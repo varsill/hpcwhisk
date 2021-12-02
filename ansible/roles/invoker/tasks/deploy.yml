@@ -39,30 +39,30 @@
 # from there; this permits a (private) registry to be used for caching the images. The registry if specified
 # must include a trailing '/'.
 #
-- name: "pull runtime action images per manifest"
-  shell: "docker pull {{runtimes_registry | default()}}{{inv_item.prefix}}/{{inv_item.name}}:{{inv_item.tag | default()}}"
-  loop: "{{ runtimesManifest.runtimes.values() | sum(start=[]) | selectattr('deprecated', 'equalto',false)  | map(attribute='image') | list | unique }}"
-  when: skip_pull_runtimes is not defined or not (skip_pull_runtimes == True or skip_pull_runtimes.lower() == "true")
-  register: result
-  until: (result.rc == 0)
-  retries: "{{ docker.pull.retries }}"
-  delay: "{{ docker.pull.delay }}"
-  loop_control:
-    loop_var: inv_item
+# - name: "pull runtime action images per manifest"
+#   shell: "docker pull {{runtimes_registry | default()}}{{inv_item.prefix}}/{{inv_item.name}}:{{inv_item.tag | default()}}"
+#   loop: "{{ runtimesManifest.runtimes.values() | sum(start=[]) | selectattr('deprecated', 'equalto',false)  | map(attribute='image') | list | unique }}"
+#   when: skip_pull_runtimes is not defined or not (skip_pull_runtimes == True or skip_pull_runtimes.lower() == "true")
+#   register: result
+#   until: (result.rc == 0)
+#   retries: "{{ docker.pull.retries }}"
+#   delay: "{{ docker.pull.delay }}"
+#   loop_control:
+#     loop_var: inv_item
 
 ###
 # See comment above for pulling other runtime images.
 #
-- name: "pull blackboxes action images per manifest"
-  shell: "docker pull {{runtimes_registry | default()}}{{inv_item.prefix}}/{{inv_item.name}}:{{inv_item.tag | default()}}"
-  loop: "{{ runtimesManifest.blackboxes }}"
-  when: skip_pull_runtimes is not defined or not (skip_pull_runtimes == True or skip_pull_runtimes.lower() == "true")
-  register: result
-  until: (result.rc == 0)
-  retries: "{{ docker.pull.retries }}"
-  delay: "{{ docker.pull.delay }}"
-  loop_control:
-    loop_var: inv_item
+# - name: "pull blackboxes action images per manifest"
+#   shell: "docker pull {{runtimes_registry | default()}}{{inv_item.prefix}}/{{inv_item.name}}:{{inv_item.tag | default()}}"
+#   loop: "{{ runtimesManifest.blackboxes }}"
+#   when: skip_pull_runtimes is not defined or not (skip_pull_runtimes == True or skip_pull_runtimes.lower() == "true")
+#   register: result
+#   until: (result.rc == 0)
+#   retries: "{{ docker.pull.retries }}"
+#   delay: "{{ docker.pull.delay }}"
+#   loop_control:
+#     loop_var: inv_item
 
 - name: "determine docker root dir on docker-machine"
   uri:  url="http://{{ ansible_host }}:{{ docker.port }}/info" return_content=yes
@@ -287,6 +287,7 @@
       "CONFIG_whisk_containerPool_prewarmExpirationCheckIntervalVariance": "{{ container_pool_prewarm_expirationCheckIntervalVariance | default('10 seconds') }}"
       "CONFIG_whisk_containerPool_prewarmPromotion": "{{ container_pool_strict | default('false') | lower }}"
       "CONFIG_whisk_containerPool_prewarmMaxRetryLimit": "{{ container_pool_prewarm_max_retry_limit | default(5) }}"
+      "CONFIG_whisk_singularity_client_imagePath": "{{ invoker.singularity.imagePath }}"
 
 - name: extend invoker dns env
   set_fact:
@@ -337,6 +338,7 @@
 - name: set invoker volumes
   set_fact:
     volumes: "/sys/fs/cgroup:/sys/fs/cgroup,\
+      {{ whisk_images_dir }}:/images,\
       {{ whisk_logs_dir }}/{{ invoker_name }}:/logs,\
       {{ invoker.confdir }}/{{ invoker_name }}:/conf,\
       {{ dockerInfo['DockerRootDir'] }}/containers/:/containers,\

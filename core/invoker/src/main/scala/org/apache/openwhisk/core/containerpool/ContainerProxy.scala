@@ -20,11 +20,9 @@ package org.apache.openwhisk.core.containerpool
 import akka.actor.Actor
 import akka.actor.ActorRef
 import akka.actor.Cancellable
-import java.time.Instant
 
-import akka.actor.Status.{Failure => FailureMessage}
+import java.time.Instant
 import akka.actor.{FSM, Props, Stash}
-import akka.event.Logging.InfoLevel
 import akka.io.IO
 import akka.io.Tcp
 import akka.io.Tcp.Close
@@ -34,25 +32,18 @@ import akka.io.Tcp.Connected
 import akka.pattern.pipe
 import pureconfig.loadConfigOrThrow
 import pureconfig.generic.auto._
+
 import java.net.InetSocketAddress
 import java.net.SocketException
-
-import org.apache.openwhisk.common.MetricEmitter
 import org.apache.openwhisk.common.TransactionId.systemPrefix
 
 import scala.collection.immutable
 import spray.json.DefaultJsonProtocol._
 import spray.json._
-import org.apache.openwhisk.common.{AkkaLogging, Counter, LoggingMarkers, TransactionId}
+import org.apache.openwhisk.common.{AkkaLogging, Counter, LoggingMarkers, MetricEmitter, TransactionId}
 import org.apache.openwhisk.core.ConfigKeys
 import org.apache.openwhisk.core.ack.ActiveAck
-import org.apache.openwhisk.core.connector.{
-  ActivationMessage,
-  CombinedCompletionAndResultMessage,
-  CompletionMessage,
-  ResultMessage
-}
-import org.apache.openwhisk.core.containerpool.logging.LogCollectingException
+import org.apache.openwhisk.core.connector.{ActivationMessage, CombinedCompletionAndResultMessage, CompletionMessage, ResultMessage}
 import org.apache.openwhisk.core.database.UserContext
 import org.apache.openwhisk.core.entity.ExecManifest.ImageName
 import org.apache.openwhisk.core.entity._
@@ -331,7 +322,7 @@ class ContainerProxy(factory: (TransactionId,
             val context = UserContext(job.msg.user)
             // construct an appropriate activation and record it in the datastore,
             // also update the feed and active ack; the container cleanup is queued
-            // implicitly via a FailureMessage which will be processed later when the state
+            // implicitly via a akka.actor.Status.Failure which will be processed later when the state
             // transitions to Running
             val activation = ContainerProxy.constructWhiskActivation(job, None, Interval.zero, false, response)
             sendActiveAck(
@@ -360,7 +351,7 @@ class ContainerProxy(factory: (TransactionId,
       goto(Started) using completed.data
 
     // container creation failed
-    case Event(_: FailureMessage, _) =>
+    case Event(_: akka.actor.Status.Failure, _) =>
       context.parent ! ContainerRemoved(true)
       stop()
 
@@ -379,7 +370,7 @@ class ContainerProxy(factory: (TransactionId,
     case Event(Remove, data: PreWarmedData) => destroyContainer(data, false)
 
     // prewarm container failed
-    case Event(_: FailureMessage, data: PreWarmedData) =>
+    case Event(_: akka.actor.Status.Failure, data: PreWarmedData) =>
       MetricEmitter.emitCounterMetric(LoggingMarkers.INVOKER_CONTAINER_HEALTH_FAILED_PREWARM)
       destroyContainer(data, true)
   }
@@ -441,7 +432,7 @@ class ContainerProxy(factory: (TransactionId,
       stay() using data
 
     //ContainerHealthError should cause rescheduling of the job
-    case Event(FailureMessage(e: ContainerHealthError), data: WarmedData) =>
+    case Event(akka.actor.Status.Failure(e: ContainerHealthError), data: WarmedData) =>
       implicit val tid = e.tid
       MetricEmitter.emitCounterMetric(LoggingMarkers.INVOKER_CONTAINER_HEALTH_FAILED_WARM)
       //resend to self will send to parent once we get to Removing state
@@ -459,7 +450,7 @@ class ContainerProxy(factory: (TransactionId,
     // Failed after /init (the first run failed) on prewarmed or cold start
     // - container will be destroyed
     // - buffered will be aborted (if init fails, we assume it will always fail)
-    case Event(f: FailureMessage, data: PreWarmedData) =>
+    case Event(f: akka.actor.Status.Failure, data: PreWarmedData) =>
       logging.error(
         this,
         s"Failed during init of cold container ${data.getContainer}, queued activations will be aborted.")
@@ -475,7 +466,7 @@ class ContainerProxy(factory: (TransactionId,
     // Failed for a subsequent /run
     // - container will be destroyed
     // - buffered will be resent (at least 1 has completed, so others are given a chance to complete)
-    case Event(_: FailureMessage, data: WarmedData) =>
+    case Event(_: akka.actor.Status.Failure, data: WarmedData) =>
       logging.error(
         this,
         s"Failed during use of warm container ${data.getContainer}, queued activations will be resent.")
@@ -491,7 +482,7 @@ class ContainerProxy(factory: (TransactionId,
     // Failed at getting a container for a cold-start run
     // - container will be destroyed
     // - buffered will be aborted (if cold start container fails to start, we assume it will continue to fail)
-    case Event(_: FailureMessage, _) =>
+    case Event(_: akka.actor.Status.Failure, _) =>
       logging.error(this, "Failed to start cold container, queued activations will be aborted.")
       activeCount -= 1
       context.parent ! ContainerRemoved(true)
@@ -521,13 +512,13 @@ class ContainerProxy(factory: (TransactionId,
     case Event(Remove, data: WarmedData) => destroyContainer(data, true)
 
     // warm container failed
-    case Event(_: FailureMessage, data: WarmedData) =>
+    case Event(_: akka.actor.Status.Failure, data: WarmedData) =>
       destroyContainer(data, true)
   }
 
   when(Pausing) {
     case Event(ContainerPaused, data: WarmedData)   => goto(Paused)
-    case Event(_: FailureMessage, data: WarmedData) => destroyContainer(data, true)
+    case Event(_: akka.actor.Status.Failure, data: WarmedData) => destroyContainer(data, true)
     case _                                          => delay
   }
 
@@ -575,7 +566,7 @@ class ContainerProxy(factory: (TransactionId,
     case Event(ContainerRemoved(_), _) =>
       stop()
     // Run failed, after another failed concurrent Run
-    case Event(_: FailureMessage, data: WarmedData) =>
+    case Event(_: akka.actor.Status.Failure, data: WarmedData) =>
       activeCount -= 1
       val newData = data.withoutResumeRun()
       if (activeCount == 0) {
@@ -890,24 +881,26 @@ class ContainerProxy(factory: (TransactionId,
     // Adds logs to the raw activation.
     val activationWithLogs: Future[Either[ActivationLogReadingError, WhiskActivation]] = activation
       .flatMap { activation =>
-        // Skips log collection entirely, if the limit is set to 0
-        if (!splitAckMessagesPendingLogCollection) {
-          Future.successful(Right(activation))
-        } else {
-          val start = tid.started(this, LoggingMarkers.INVOKER_COLLECT_LOGS, logLevel = InfoLevel)
-          collectLogs(tid, job.msg.user, activation, container, job.action)
-            .andThen {
-              case Success(_) => tid.finished(this, start)
-              case Failure(t) => tid.failed(this, start, s"reading logs failed: $t")
-            }
-            .map(logs => Right(activation.withLogs(logs)))
-            .recover {
-              case LogCollectingException(logs) =>
-                Left(ActivationLogReadingError(activation.withLogs(logs)))
-              case _ =>
-                Left(ActivationLogReadingError(activation.withLogs(ActivationLogs(Vector(Messages.logFailure)))))
-            }
-        }
+        Future.successful(Right(activation))
+        // Skip log collection, Singularity cannot grab container logs as of now
+
+        // if (true) {//(job.action.limits.logs.asMegaBytes == 0.MB) {
+        //   Future.successful(Right(activation))
+        // } else {
+        //   val start = tid.started(this, LoggingMarkers.INVOKER_COLLECT_LOGS, logLevel = InfoLevel)
+        //   collectLogs(tid, job.msg.user, activation, container, job.action)
+        //     .andThen {
+        //       case Success(_) => tid.finished(this, start)
+        //       case Failure(t) => tid.failed(this, start, s"reading logs failed: $t")
+        //     }
+        //     .map(logs => Right(activation.withLogs(logs)))
+        //     .recover {
+        //       case LogCollectingException(logs) =>
+        //         Left(ActivationLogReadingError(activation.withLogs(logs)))
+        //       case _ =>
+        //         Left(ActivationLogReadingError(activation.withLogs(ActivationLogs(Vector(Messages.logFailure)))))
+        //     }
+        // }
       }
 
     activationWithLogs
@@ -1148,7 +1141,7 @@ class TCPPingClient(tcp: ActorRef,
           this,
           s"Failed health connection to $containerId ($addressString) $failedCount times - exceeded max ${config.maxFails} failures")
         //destroy this container since we cannot communicate with it
-        context.parent ! FailureMessage(
+        context.parent ! akka.actor.Status.Failure(
           new SocketException(s"Health connection to $containerId ($addressString) failed $failedCount times"))
         cancelPing()
         context.stop(self)

@@ -18,6 +18,7 @@ results
 !/ansible/environments/docker-machine
 !/ansible/environments/local
 !/ansible/environments/mac
+!/ansible/environments/vagrant
 
 # Eclipse
 bin/
@@ -70,22 +71,29 @@ ansible/roles/invoker/files/*
 *.zip
 tests/dat/actions/zippedaction/node_modules
 tests/dat/actions/sleep.jar
-tests/dat/actions/blackbox.zip
-tests/dat/actions/python.zip
-tests/dat/actions/zippedaction.zip
-tests/dat/actions/zippedaction/node_modules
-tests/dat/actions/python2_virtualenv.zip
-tests/dat/actions/python_virtualenv/virtualenv
-tests/dat/actions/.built
-tests/dat/actions/unicode.tests/java-8.bin
-tests/performance/gatling_tests/src/gatling/resources/data/javaAction.jar
+!tests/dat/actions/blackbox.zip
+!tests/dat/actions/helloSwift.zip
+!tests/dat/actions/python.zip
+!tests/dat/actions/python2_virtualenv.zip
+!tests/dat/actions/python3_virtualenv.zip
+!tests/dat/actions/python_virtualenv_dir.zip
+!tests/dat/actions/python_virtualenv_name.zip
+!tests/dat/actions/zippedaction.zip
+!performance-tests/results.zip
 tests/performance/gatling_tests/.built
-
+tests/performance/gatling_tests/src/gatling/resources/data/javaAction.jar
+tests/dat/actions/unicode.tests/java-8.bin
+tests/dat/actions/.built
+tests/dat/actions/python_virtualenv/virtualenv
 # dev
 intellij-run-config.groovy
 
 # VSCode
 .vscode/
+
+# local invoker deployment
+local-invoker-deployment/config
+local-invoker-deployment/invoker
 
 # route management
 core/routemgmt/createApi/apigw-utils.js

@@ -223,6 +223,8 @@ invoker:
       name: "{{ __invoker_ssl_keyPrefix }}openwhisk-keystore.p12"
   reactiveSpi: "{{ invokerReactive_spi | default('') }}"
   serverSpi: "{{ invokerServer_spi | default('') }}"
+  singularity:
+    imagePath: "/images/"
 
 userLogs:
   spi: "{{ userLogs_spi | default('org.apache.openwhisk.core.containerpool.logging.DockerToActivationLogStoreProvider') }}"

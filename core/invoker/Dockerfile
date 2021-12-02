@@ -25,16 +25,21 @@ ENV UID=1001 \
 # If this cannot be guaranteed, set `invoker_use_runc: false` in the ansible env.
 
 
-RUN apk add --update openssl
+RUN apk add gcc libc-dev squashfs-tools make python3 libarchive-dev tar linux-headers \
+    autoconf libtool automake
 
-# Uncomment to fetch latest version of docker instead: RUN wget -qO- https://get.docker.com | sh
-# Install docker client
-RUN curl -sSL -o docker-${DOCKER_VERSION}.tgz https://download.docker.com/linux/static/stable/x86_64/docker-${DOCKER_VERSION}.tgz && \
-    tar --strip-components 1 -xvzf docker-${DOCKER_VERSION}.tgz -C /usr/bin docker/docker && \
-    tar --strip-components 1 -xvzf docker-${DOCKER_VERSION}.tgz -C /usr/bin docker/docker-runc && \
-    rm -f docker-${DOCKER_VERSION}.tgz && \
-    chmod +x /usr/bin/docker && \
-    chmod +x /usr/bin/docker-runc
+RUN ln -s /usr/bin/python3 /usr/bin/python && \
+    ln -s /usr/bin/pip3 /usr/bin/pip
+
+RUN wget https://github.com/sylabs/singularity/archive/refs/tags/2.5.1.tar.gz && \
+    tar xvf 2.5.1.tar.gz && \
+    cd singularity-2.5.1 && \
+    ./autogen.sh && \
+    ./configure --prefix=/usr/local --sysconfdir=/etc && \
+    make && \
+    make install
+
+RUN apk add iptables
 
 ADD build/distributions/invoker.tar ./
 

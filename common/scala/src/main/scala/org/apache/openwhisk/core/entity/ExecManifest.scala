@@ -181,6 +181,30 @@ protected[core] object ExecManifest {
                                        tag: Option[String] = None) {
 
     /**
+     * The name of the public image for an action kind.
+     */
+    def publicImageName: String = {
+      val p = prefix.filter(_.nonEmpty).map(_ + "/").getOrElse("")
+      val t = tag.filter(_.nonEmpty).map(":" + _).getOrElse("")
+      p + name + t
+    }
+
+    /**
+     * The internal name of the image for an action kind relative to a registry.
+     */
+    def localImageName(registry: String): String = {
+      val r = Option(registry)
+        .filter(_.nonEmpty)
+        .map { reg =>
+          if (reg.endsWith("/")) reg else reg + "/"
+        }
+        .getOrElse("")
+      val p = prefix.filter(_.nonEmpty).map(_ + "/").getOrElse("")
+      val t = tag.filter(_.nonEmpty).map(":" + _).getOrElse("")
+      r + p + name + t
+    }
+
+    /**
      * The actual name of the image for an action kind resolved by registry setting.
      */
     def resolveImageName(systemRegistry: Option[String] = None): String = {
