@@ -60,6 +60,7 @@ object MessageFeed {
   protected[connector] case object Idle extends FeedState
   protected[connector] case object FillingPipeline extends FeedState
   protected[connector] case object DrainingPipeline extends FeedState
+  protected[connector] case object Inactive extends FeedState
 
   protected sealed trait FeedData
   private case object NoData extends FeedData
@@ -72,6 +73,9 @@ object MessageFeed {
 
   /** Indicates the fill operation has completed. */
   private case class FillCompleted(messages: Seq[(String, Int, Long, Array[Byte])])
+
+  /** Gracefully shutdown MessageFeed */
+  object GracefulShutdown
 }
 
 /**
@@ -96,6 +100,7 @@ class MessageFeed(description: String,
                   maximumHandlerCapacity: Int,
                   longPollDuration: FiniteDuration,
                   handler: Array[Byte] => Future[Unit],
+                  returnMsg: Array[Byte] => Future[Unit] = _ => Future.successful(()),
                   autoStart: Boolean = true,
                   logHandoff: Boolean = true)
     extends FSM[MessageFeed.FeedState, MessageFeed.FeedData] {
@@ -124,10 +129,25 @@ class MessageFeed(description: String,
     this,
     s"handler capacity = $maximumHandlerCapacity, pipeline fill at = $pipelineFillThreshold, pipeline depth = $maxPipelineDepth")
 
+  @tailrec
+  private def switchDisabled(): Unit = {
+    val occupancy = outstandingMessages.size
+    if (occupancy > 0) {
+      val (_, _, _, bytes) = outstandingMessages.head
+      outstandingMessages = outstandingMessages.tail
+      returnMsg(bytes)
+      switchDisabled()
+    }
+  }
+
   when(Idle) {
     case Event(Ready, _) =>
       fillPipeline()
       goto(FillingPipeline)
+
+    case Event(GracefulShutdown, _) =>
+      switchDisabled()
+      goto(Inactive)
 
     case _ => stay
   }
@@ -151,6 +171,16 @@ class MessageFeed(description: String,
         goto(DrainingPipeline)
       }
 
+    case Event(GracefulShutdown, _) =>
+      goto(Inactive)
+
+    case _ => stay
+  }
+
+  when(Inactive) {
+    case Event(FillCompleted(messages), _) =>
+      switchDisabled()
+      stay
     case _ => stay
   }
 
@@ -162,6 +192,10 @@ class MessageFeed(description: String,
         fillPipeline()
         goto(FillingPipeline)
       } else stay
+
+    case Event(GracefulShutdown, _) =>
+      switchDisabled()
+      goto(Inactive)
 
     case _ => stay
   }

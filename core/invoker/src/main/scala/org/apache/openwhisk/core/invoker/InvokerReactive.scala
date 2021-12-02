@@ -19,7 +19,6 @@ package org.apache.openwhisk.core.invoker
 
 import java.nio.charset.StandardCharsets
 import java.time.Instant
-
 import akka.Done
 import akka.actor.{ActorRefFactory, ActorSystem, CoordinatedShutdown, Props}
 import akka.event.Logging.InfoLevel
@@ -47,6 +46,8 @@ import scala.util.{Failure, Success}
 
 object InvokerReactive extends InvokerProvider {
 
+  val RETURN_TOPIC = "fastlane"
+
   override def instance(
     config: WhiskConfig,
     instance: InvokerInstanceId,
@@ -73,6 +74,20 @@ class InvokerReactive(
   private val logsProvider = SpiLoader.get[LogStoreProvider].instance(actorSystem)
   logging.info(this, s"LogStoreProvider: ${logsProvider.getClass}")
 
+
+  Runtime.getRuntime.addShutdownHook(new Thread() {
+    override def run(): Unit = {
+      activationFeed ! MessageFeed.GracefulShutdown
+      pool ! MessageFeed.GracefulShutdown
+      logging.info(this, "Invoker gracefully disabled")
+
+      /* never return */
+      while(true) {
+        Thread.sleep(1000000)
+      }
+    }
+  })
+
   /**
    * Factory used by the ContainerProxy to physically create a new container.
    *
@@ -96,7 +111,7 @@ class InvokerReactive(
 
   CoordinatedShutdown(actorSystem)
     .addTask(CoordinatedShutdown.PhaseBeforeActorSystemTerminate, "cleanup runtime containers") { () =>
-      containerFactory.cleanup()
+//      containerFactory.cleanup()
       Future.successful(Done)
     }
 
@@ -130,7 +145,7 @@ class InvokerReactive(
     msgProvider.getConsumer(config, topic, topic, maxPeek, maxPollInterval = TimeLimit.MAX_DURATION + 1.minute)
 
   private val activationFeed = actorSystem.actorOf(Props {
-    new MessageFeed("activation", logging, consumer, maxPeek, 1.second, processActivationMessage)
+    new MessageFeed("activation", logging, consumer, maxPeek, 1.second, processActivationMessage, returnRawMessage)
   })
 
   private val ack = {
@@ -162,7 +177,7 @@ class InvokerReactive(
   }
 
   private val pool =
-    actorSystem.actorOf(ContainerPool.props(childFactory, poolConfig, activationFeed, prewarmingConfigs))
+    actorSystem.actorOf(ContainerPool.props(childFactory, poolConfig, activationFeed, prewarmingConfigs, Some(returnMessage)))
 
   def handleActivationMessage(msg: ActivationMessage)(implicit transid: TransactionId): Future[Unit] = {
     val namespace = msg.action.path
@@ -260,6 +275,25 @@ class InvokerReactive(
           // to deserialize, or something threw an error where it is not expected to throw.
           activationFeed ! MessageFeed.Processed
           logging.error(this, s"terminal failure while processing message: $t")
+          Future.successful(())
+      }
+  }
+
+  def returnMessage(msg: Message): Future[Unit] = {
+    producer.send(InvokerReactive.RETURN_TOPIC, msg).andThen {
+      case Failure(t) => logging.error(this, s"failed to return message: $t")
+    }
+    Future.successful(())
+  }
+
+  def returnRawMessage(bytes: Array[Byte]): Future[Unit] = {
+    Future(new String(bytes, StandardCharsets.UTF_8))
+      .flatMap(str => returnMessage(new Message() {
+        override def serialize: String = str
+      }))
+      .recoverWith {
+        case t =>
+          logging.error(this, s"Failure during return of raw message")
           Future.successful(())
       }
   }

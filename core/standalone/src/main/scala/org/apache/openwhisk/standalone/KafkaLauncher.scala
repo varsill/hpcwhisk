@@ -57,7 +57,8 @@ class KafkaLauncher(
     // Here controller / invoker will use LISTENER_LOCAL since they run in the same JVM as the embedded Kafka
     // and Kafka UI will run in a Docker container and use LISTENER_DOCKER
     val brokerProps = Map(
-      KafkaConfig.ListenersProp -> s"LISTENER_LOCAL://localhost:$kafkaPort,LISTENER_DOCKER://localhost:$kafkaDockerPort",
+      KafkaConfig.ListenersProp -> s"LISTENER_LOCAL://localhost:$kafkaPort,LISTENER_DOCKER://${StandaloneDockerSupport
+        .getLocalHostIp()}:$kafkaDockerPort",
       KafkaConfig.AdvertisedListenersProp -> s"LISTENER_LOCAL://localhost:$kafkaPort,LISTENER_DOCKER://${StandaloneDockerSupport
         .getLocalHostIp()}:$kafkaDockerPort",
       KafkaConfig.ListenerSecurityProtocolMapProp -> "LISTENER_LOCAL:PLAINTEXT,LISTENER_DOCKER:PLAINTEXT",

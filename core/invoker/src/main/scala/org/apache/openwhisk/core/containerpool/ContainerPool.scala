@@ -19,13 +19,15 @@ package org.apache.openwhisk.core.containerpool
 
 import akka.actor.{Actor, ActorRef, ActorRefFactory, Props}
 import org.apache.openwhisk.common.{Logging, LoggingMarkers, MetricEmitter, TransactionId}
-import org.apache.openwhisk.core.connector.MessageFeed
+import org.apache.openwhisk.core.connector.MessageFeed.GracefulShutdown
+import org.apache.openwhisk.core.connector.{Message, MessageFeed}
 import org.apache.openwhisk.core.entity.ExecManifest.ReactivePrewarmingConfig
 import org.apache.openwhisk.core.entity._
 import org.apache.openwhisk.core.entity.size._
 
 import scala.annotation.tailrec
 import scala.collection.immutable
+import scala.concurrent.Future
 import scala.concurrent.duration._
 import scala.util.{Random, Try}
 
@@ -58,7 +60,8 @@ case object AdjustPrewarmedContainer
 class ContainerPool(childFactory: ActorRefFactory => ActorRef,
                     feed: ActorRef,
                     prewarmConfig: List[PrewarmingConfig] = List.empty,
-                    poolConfig: ContainerPoolConfig)(implicit val logging: Logging)
+                    poolConfig: ContainerPoolConfig,
+                    returnMsg: Option[Message => Future[Unit]])(implicit val logging: Logging)
     extends Actor {
   import ContainerPool.memoryConsumptionOf
 
@@ -74,6 +77,7 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
   var runBuffer = immutable.Queue.empty[Run]
   // Track the resent buffer head - so that we don't resend buffer head multiple times
   var resent: Option[Run] = None
+  var running = true
   val logMessageInterval = 10.seconds
   //periodically emit metrics (don't need to do this for each message!)
   context.system.scheduler.scheduleAtFixedRate(30.seconds, 10.seconds, self, EmitMetrics)
@@ -113,7 +117,21 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
       akka.event.Logging.InfoLevel)
   }
 
+  @tailrec
+  private def returnMessages(): Unit = {
+    if (runBuffer.nonEmpty) {
+      val (item, remaining) = runBuffer.dequeue
+      runBuffer = remaining
+      returnMsg.map(i=> i(item.msg))
+      returnMessages()
+    }
+  }
+
   def receive: Receive = {
+    case GracefulShutdown =>
+      running = false
+      returnMessages()
+
     // A job to run on a container
     //
     // Run messages are received either via the feed or from child containers which cannot process
@@ -126,7 +144,10 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
       // Only process request, if there are no other requests waiting for free slots, or if the current request is the
       // next request to process
       // It is guaranteed, that only the first message on the buffer is resent.
-      if (runBuffer.isEmpty || isResentFromBuffer) {
+      if (!running) {
+        returnMsg.map(fn => fn(r.msg))
+        returnMessages()
+      } else if (runBuffer.isEmpty || isResentFromBuffer) {
         if (isResentFromBuffer) {
           //remove from resent tracking - it may get resent again, or get processed
           resent = None
@@ -244,7 +265,7 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
       if (newData.activeActivationCount < 0) {
         logging.error(this, s"invalid activation count after warming < 1 ${newData}")
       }
-      if (newData.hasCapacity()) {
+      if (running && newData.hasCapacity()) {
         //remove from busy pool (may already not be there), put back into free pool (to update activation counts)
         freePool = freePool + (sender() -> newData)
         if (busyPool.contains(sender())) {
@@ -317,7 +338,9 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
       case Some((run, _)) => //run the first from buffer
         implicit val tid = run.msg.transid
         //avoid sending dupes
-        if (resent.isEmpty) {
+        if (!running) {
+          returnMessages()
+        } else if (resent.isEmpty) {
           logging.info(this, s"re-processing from buffer (${runBuffer.length} items in buffer)")
           resent = Some(run)
           self ! run
@@ -701,8 +724,9 @@ object ContainerPool {
   def props(factory: ActorRefFactory => ActorRef,
             poolConfig: ContainerPoolConfig,
             feed: ActorRef,
-            prewarmConfig: List[PrewarmingConfig] = List.empty)(implicit logging: Logging) =
-    Props(new ContainerPool(factory, feed, prewarmConfig, poolConfig))
+            prewarmConfig: List[PrewarmingConfig] = List.empty,
+            returnMsg: Option[Message => Future[Unit]])(implicit logging: Logging) =
+    Props(new ContainerPool(factory, feed, prewarmConfig, poolConfig, returnMsg))
 }
 
 /** Contains settings needed to perform container prewarming. */
