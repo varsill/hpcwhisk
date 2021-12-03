@@ -144,8 +144,11 @@ class InvokerReactive(
   private val consumer =
     msgProvider.getConsumer(config, topic, topic, maxPeek, maxPollInterval = TimeLimit.MAX_DURATION + 1.minute)
 
+  private val fastConsumer =
+    msgProvider.getConsumer(config, InvokerReactive.RETURN_TOPIC, InvokerReactive.RETURN_TOPIC, maxPeek, maxPollInterval = TimeLimit.MAX_DURATION + 1.minute)
+
   private val activationFeed = actorSystem.actorOf(Props {
-    new MessageFeed("activation", logging, consumer, maxPeek, 1.second, processActivationMessage, returnRawMessage)
+    new MessageFeed("activation", logging, consumer, maxPeek, 1.second, processActivationMessage, returnRawMessage, fastConsumer=Some(fastConsumer))
   })
 
   private val ack = {

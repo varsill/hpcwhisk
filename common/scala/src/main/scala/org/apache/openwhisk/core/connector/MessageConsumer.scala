@@ -102,7 +102,8 @@ class MessageFeed(description: String,
                   handler: Array[Byte] => Future[Unit],
                   returnMsg: Array[Byte] => Future[Unit] = _ => Future.successful(()),
                   autoStart: Boolean = true,
-                  logHandoff: Boolean = true)
+                  logHandoff: Boolean = true,
+                  fastConsumer: Option[MessageConsumer] = None)
     extends FSM[MessageFeed.FeedState, MessageFeed.FeedData] {
   import MessageFeed._
 
@@ -217,9 +218,20 @@ class MessageFeed(description: String,
           // While the commit is synchronous and will block until it completes, at steady
           // state with enough buffering (i.e., maxPipelineDepth > maxPeek), the latency
           // of the commit should be masked.
-          val records = consumer.peek(longPollDuration)
-          consumer.commit()
-          FillCompleted(records.toSeq)
+          val fastRecords = fastConsumer.map(f => {
+            val res = f.peek(1.microsecond)
+            f.commit()
+            res.toSeq
+          }).getOrElse(Seq.empty)
+          if (fastRecords.nonEmpty) {
+            logging.info(this, s"Received fast ${fastRecords.size}")
+            FillCompleted(fastRecords)
+          }else {
+            val records = consumer.peek(longPollDuration)
+            consumer.commit()
+//            logging.info(this, "Received slow")
+            FillCompleted(records.toSeq)
+          }
         }
       }.andThen {
           case Failure(e: CommitFailedException) =>
