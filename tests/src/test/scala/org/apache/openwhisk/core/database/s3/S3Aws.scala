@@ -18,7 +18,6 @@
 package org.apache.openwhisk.core.database.s3
 
 import akka.actor.ActorSystem
-import akka.stream.ActorMaterializer
 import com.typesafe.config.ConfigFactory
 import org.scalatest.FlatSpec
 import org.apache.openwhisk.common.Logging
@@ -27,9 +26,11 @@ import org.apache.openwhisk.core.database.{AttachmentStore, DocumentSerializer}
 import scala.reflect.ClassTag
 
 trait S3Aws extends FlatSpec {
+
+  def cloudFrontConfig: String = ""
+
   def makeS3Store[D <: DocumentSerializer: ClassTag]()(implicit actorSystem: ActorSystem,
-                                                       logging: Logging,
-                                                       materializer: ActorMaterializer): AttachmentStore = {
+                                                       logging: Logging): AttachmentStore = {
     val config = ConfigFactory.parseString(s"""
        |whisk {
        |   s3 {
@@ -47,17 +48,18 @@ trait S3Aws extends FlatSpec {
        |         }
        |      }
        |      bucket = "$bucket"
+       |      $cloudFrontConfig
        |    }
        |}
-      """.stripMargin).withFallback(ConfigFactory.load())
+      """.stripMargin).withFallback(ConfigFactory.load()).resolve()
     S3AttachmentStoreProvider.makeStore[D](config)
   }
 
   override protected def withFixture(test: NoArgTest) = {
     assume(
       secretAccessKey != null,
-      s"'AWS_SECRET_ACCESS_KEY' env not configured. Configure following " +
-        s"env variables for test to run. 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION'")
+      "'AWS_SECRET_ACCESS_KEY' env not configured. Configure following " +
+        "env variables for test to run. 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION'")
 
     require(accessKeyId != null, "'AWS_ACCESS_KEY_ID' env variable not set")
     require(region != null, "'AWS_REGION' env variable not set")
@@ -65,7 +67,7 @@ trait S3Aws extends FlatSpec {
     super.withFixture(test)
   }
 
-  val bucket = "test-ow-travis"
+  val bucket = Option(System.getenv("AWS_BUCKET")).getOrElse("test-ow-travis")
 
   val accessKeyId = System.getenv("AWS_ACCESS_KEY_ID")
   val secretAccessKey = System.getenv("AWS_SECRET_ACCESS_KEY")

@@ -32,7 +32,7 @@ import java.time.Instant
 import akka.NotUsed
 import akka.actor.ActorSystem
 import akka.stream.alpakka.file.scaladsl.LogRotatorSink
-import akka.stream.{Graph, SinkShape, UniformFanOutShape}
+import akka.stream.{Graph, RestartSettings, SinkShape, UniformFanOutShape}
 import akka.stream.scaladsl.{Broadcast, Flow, GraphDSL, Keep, MergeHub, RestartSink, Sink, Source}
 import akka.util.ByteString
 
@@ -40,7 +40,6 @@ import org.apache.openwhisk.common.{AkkaLogging, TransactionId}
 import org.apache.openwhisk.core.containerpool.Container
 import org.apache.openwhisk.core.entity.{ActivationLogs, ExecutableWhiskAction, Identity, WhiskActivation}
 import org.apache.openwhisk.core.entity.size._
-import org.apache.openwhisk.http.Messages
 
 import spray.json._
 import spray.json.DefaultJsonProtocol._
@@ -88,32 +87,33 @@ class DockerToActivationFileLogStore(system: ActorSystem, destinationDirectory: 
   protected val writeToFile: Sink[ByteString, _] = MergeHub
     .source[ByteString]
     .batchWeighted(bufferSize.toBytes, _.length, identity)(_ ++ _)
-    .to(RestartSink.withBackoff(minBackoff = 1.seconds, maxBackoff = 60.seconds, randomFactor = 0.2) { () =>
-      LogRotatorSink(() => {
-        val maxSize = bufferSize.toBytes
-        var bytesRead = maxSize
-        element =>
-          {
-            val size = element.size
-            if (bytesRead + size > maxSize) {
-              bytesRead = size
-              val logFilePath = destinationDirectory.resolve(s"userlogs-${Instant.now.toEpochMilli}.log")
-              logging.info(this, s"Rotating log file to '$logFilePath'")
-              try {
-                Files.createFile(logFilePath)
-                Files.setPosixFilePermissions(logFilePath, perms)
-              } catch {
-                case t: Throwable =>
-                  logging.error(this, s"Couldn't create userlogs file: $t")
-                  throw t
+    .to(RestartSink.withBackoff(RestartSettings(minBackoff = 1.seconds, maxBackoff = 60.seconds, randomFactor = 0.2)) {
+      () =>
+        LogRotatorSink(() => {
+          val maxSize = bufferSize.toBytes
+          var bytesRead = maxSize
+          element =>
+            {
+              val size = element.size
+              if (bytesRead + size > maxSize) {
+                bytesRead = size
+                val logFilePath = destinationDirectory.resolve(s"userlogs-${Instant.now.toEpochMilli}.log")
+                logging.info(this, s"Rotating log file to '$logFilePath'")
+                try {
+                  Files.createFile(logFilePath)
+                  Files.setPosixFilePermissions(logFilePath, perms)
+                } catch {
+                  case t: Throwable =>
+                    logging.error(this, s"Couldn't create userlogs file: $t")
+                    throw t
+                }
+                Some(logFilePath)
+              } else {
+                bytesRead += size
+                None
               }
-              Some(logFilePath)
-            } else {
-              bytesRead += size
-              None
             }
-          }
-      })
+        })
     })
     .run()
 
@@ -123,15 +123,17 @@ class DockerToActivationFileLogStore(system: ActorSystem, destinationDirectory: 
                            container: Container,
                            action: ExecutableWhiskAction): Future[ActivationLogs] = {
 
-    val isTimedoutActivation = activation.isTimedoutActivation
-    val logs = logStream(transid, container, action, isTimedoutActivation)
+    val logLimit = action.limits.logs
+    val isDeveloperError = activation.response.isContainerError // container error means developer error
+    val logs = logStream(transid, container, logLimit, action.exec.sentinelledLogs, isDeveloperError)
 
     // Adding the userId field to every written record, so any background process can properly correlate.
     val userIdField = Map("namespaceId" -> user.namespace.uuid.toJson)
 
     val additionalMetadata = Map(
       "activationId" -> activation.activationId.asString.toJson,
-      "action" -> action.fullyQualifiedName(false).asString.toJson) ++ userIdField
+      "action" -> action.fullyQualifiedName(false).asString.toJson,
+      "namespace" -> user.namespace.name.asString.toJson) ++ userIdField
 
     val augmentedActivation = JsObject(activation.toJson.fields ++ userIdField)
 
@@ -150,10 +152,8 @@ class DockerToActivationFileLogStore(system: ActorSystem, destinationDirectory: 
     val combined = OwSink.combine(toSeq, toFile)(Broadcast[ByteString](_))
 
     logs.runWith(combined)._1.flatMap { seq =>
-      val possibleErrors = Set(Messages.logFailure, Messages.truncateLogs(action.limits.logs.asMegaBytes))
-      val errored = isTimedoutActivation || seq.lastOption.exists(last => possibleErrors.exists(last.contains))
       val logs = ActivationLogs(seq.toVector)
-      if (!errored) {
+      if (!isLogCollectingError(logs, logLimit, isDeveloperError)) {
         Future.successful(logs)
       } else {
         Future.failed(LogCollectingException(logs))
@@ -173,7 +173,7 @@ object OwSink {
    * values of either sink. Code basically copied from {@code Sink.combine}
    */
   def combine[T, U, M1, M2](first: Sink[U, M1], second: Sink[U, M2])(
-    strategy: Int ⇒ Graph[UniformFanOutShape[T, U], NotUsed]): Sink[T, (M1, M2)] = {
+    strategy: Int => Graph[UniformFanOutShape[T, U], NotUsed]): Sink[T, (M1, M2)] = {
     Sink.fromGraph(GraphDSL.create(first, second)((_, _)) { implicit b => (s1, s2) =>
       import GraphDSL.Implicits._
       val d = b.add(strategy(2))

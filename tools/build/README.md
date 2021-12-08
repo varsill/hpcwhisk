@@ -30,6 +30,8 @@ The script is called `redo` because for most development, one will want to "redo
 - usage information: `redo -h`
 - initialize environment and `docker-machine` (for mac): `redo setup prereq`
 - start CouchDB container and initialize DB with system and guest keys: `redo couchdb initdb`
+- start ElasticSearch container to store activations: `redo elasticsearch`
+- start MongoDB container to as database backend: `redo mongodb`
 - build and deploy system: `redo deploy`
 - run tests: `redo props tests`
 
@@ -51,7 +53,7 @@ Some components are dynamically generated. This is supported by a generic compon
 which specifies a regex. The `runtime:([\w]+)` is one such component, useful for rebuilding
 action runtime images.
 
-  * `redo --dir /path/to/incubator-openwhisk-runtime-nodejs runtime:nodejs6action`
+  * `redo --dir /path/to/openwhisk-runtime-nodejs runtime:nodejs6action`
 
 ## How to use `citool`
 

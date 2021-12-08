@@ -21,6 +21,7 @@ import java.nio.charset.StandardCharsets
 
 import com.typesafe.config.ConfigValue
 import pureconfig._
+import pureconfig.generic.auto._
 import spray.json._
 import ByteSize.formatError
 
@@ -28,25 +29,55 @@ object SizeUnits extends Enumeration {
 
   sealed abstract class Unit() {
     def toBytes(n: Long): Long
+
     def toKBytes(n: Long): Long
+
     def toMBytes(n: Long): Long
+
+    def toGBytes(n: Long): Long
   }
 
   case object BYTE extends Unit {
     def toBytes(n: Long): Long = n
+
     def toKBytes(n: Long): Long = n / 1024
+
     def toMBytes(n: Long): Long = n / 1024 / 1024
+
+    def toGBytes(n: Long): Long = n / 1024 / 1024 / 1024
   }
+
   case object KB extends Unit {
     def toBytes(n: Long): Long = n * 1024
+
     def toKBytes(n: Long): Long = n
+
     def toMBytes(n: Long): Long = n / 1024
+
+    def toGBytes(n: Long): Long = n / 1024 / 1024
+
   }
+
   case object MB extends Unit {
     def toBytes(n: Long): Long = n * 1024 * 1024
+
     def toKBytes(n: Long): Long = n * 1024
+
     def toMBytes(n: Long): Long = n
+
+    def toGBytes(n: Long): Long = n / 1024
   }
+
+  case object GB extends Unit {
+    def toBytes(n: Long): Long = n * 1024 * 1024 * 1024
+
+    def toKBytes(n: Long): Long = n * 1024 * 1024
+
+    def toMBytes(n: Long): Long = n * 1024
+
+    def toGBytes(n: Long): Long = n
+  }
+
 }
 
 case class ByteSize(size: Long, unit: SizeUnits.Unit) extends Ordered[ByteSize] {
@@ -54,7 +85,9 @@ case class ByteSize(size: Long, unit: SizeUnits.Unit) extends Ordered[ByteSize] 
   require(size >= 0, "a negative size of an object is not allowed.")
 
   def toBytes = unit.toBytes(size)
+
   def toKB = unit.toKBytes(size)
+
   def toMB = unit.toMBytes(size)
 
   def +(other: ByteSize): ByteSize = {
@@ -98,13 +131,14 @@ case class ByteSize(size: Long, unit: SizeUnits.Unit) extends Ordered[ByteSize] 
       case SizeUnits.BYTE => s"$size B"
       case SizeUnits.KB   => s"$size KB"
       case SizeUnits.MB   => s"$size MB"
+      case SizeUnits.GB   => s"$size GB"
     }
   }
 }
 
 object ByteSize {
-  private val regex = """(?i)\s?(\d+)\s?(MB|KB|B|M|K)\s?""".r.pattern
-  protected[entity] val formatError = """Size Unit not supported. Only "B", "K[B]" and "M[B]" are supported."""
+  private val regex = """(?i)\s?(\d+)\s?(GB|MB|KB|B|G|M|K)\s?""".r.pattern
+  protected[entity] val formatError = """Size Unit not supported. Only "B", "K[B]", "M[B]" and "G[B]" are supported."""
 
   def fromString(sizeString: String): ByteSize = {
     val matcher = regex.matcher(sizeString)
@@ -114,6 +148,7 @@ object ByteSize {
         case 'B' => SizeUnits.BYTE
         case 'K' => SizeUnits.KB
         case 'M' => SizeUnits.MB
+        case 'G' => SizeUnits.GB
       }
 
       ByteSize(size, unit)
@@ -124,6 +159,7 @@ object ByteSize {
 }
 
 object size {
+
   implicit class SizeInt(n: Int) extends SizeConversion {
     def sizeIn(unit: SizeUnits.Unit): ByteSize = ByteSize(n, unit)
   }
@@ -149,7 +185,7 @@ object size {
   implicit val pureconfigReader =
     ConfigReader[ConfigValue].map(v => ByteSize(v.atKey("key").getBytes("key"), SizeUnits.BYTE))
 
-  protected[entity] implicit val serdes = new RootJsonFormat[ByteSize] {
+  protected[core] implicit val serdes = new RootJsonFormat[ByteSize] {
     def write(b: ByteSize) = JsString(b.toString)
 
     def read(value: JsValue): ByteSize = value match {
@@ -161,11 +197,20 @@ object size {
 
 trait SizeConversion {
   def B = sizeIn(SizeUnits.BYTE)
+
   def KB = sizeIn(SizeUnits.KB)
+
   def MB = sizeIn(SizeUnits.MB)
+
+  def GB: ByteSize = sizeIn(SizeUnits.GB)
+
   def bytes = B
+
   def kilobytes = KB
+
   def megabytes = MB
+
+  def gigabytes: ByteSize = GB
 
   def sizeInBytes = sizeIn(SizeUnits.BYTE)
 

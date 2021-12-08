@@ -24,12 +24,11 @@ import scala.concurrent.duration.DurationInt
 import scala.util.Failure
 import scala.util.Success
 import scala.util.Try
-
 import akka.actor.ActorSystem
 import akka.actor.Props
 import spray.json._
 import org.apache.openwhisk.common.Logging
-import org.apache.openwhisk.core.WhiskConfig
+import org.apache.openwhisk.core.{ConfigKeys, WhiskConfig}
 import org.apache.openwhisk.core.connector.Message
 import org.apache.openwhisk.core.connector.MessageFeed
 import org.apache.openwhisk.core.connector.MessagingProvider
@@ -41,6 +40,7 @@ import org.apache.openwhisk.core.entity.WhiskPackage
 import org.apache.openwhisk.core.entity.WhiskRule
 import org.apache.openwhisk.core.entity.WhiskTrigger
 import org.apache.openwhisk.spi.SpiLoader
+import pureconfig._
 
 case class CacheInvalidationMessage(key: CacheKey, instanceId: String) extends Message {
   override def serialize = CacheInvalidationMessage.serdes.write(this).compactPrint
@@ -54,19 +54,18 @@ object CacheInvalidationMessage extends DefaultJsonProtocol {
 class RemoteCacheInvalidation(config: WhiskConfig, component: String, instance: ControllerInstanceId)(
   implicit logging: Logging,
   as: ActorSystem) {
-
+  import RemoteCacheInvalidation._
   implicit private val ec = as.dispatchers.lookup("dispatchers.kafka-dispatcher")
 
-  private val topic = "cacheInvalidation"
   private val instanceId = s"$component${instance.asString}"
 
   private val msgProvider = SpiLoader.get[MessagingProvider]
   private val cacheInvalidationConsumer =
-    msgProvider.getConsumer(config, s"$topic$instanceId", topic, maxPeek = 128)
+    msgProvider.getConsumer(config, s"$cacheInvalidationTopic$instanceId", cacheInvalidationTopic, maxPeek = 128)
   private val cacheInvalidationProducer = msgProvider.getProducer(config)
 
   def notifyOtherInstancesAboutInvalidation(key: CacheKey): Future[Unit] = {
-    cacheInvalidationProducer.send(topic, CacheInvalidationMessage(key, instanceId)).map(_ => Unit)
+    cacheInvalidationProducer.send(cacheInvalidationTopic, CacheInvalidationMessage(key, instanceId)).map(_ => ())
   }
 
   private val invalidationFeed = as.actorOf(Props {
@@ -99,4 +98,9 @@ class RemoteCacheInvalidation(config: WhiskConfig, component: String, instance: 
     }
     invalidationFeed ! MessageFeed.Processed
   }
+}
+
+object RemoteCacheInvalidation {
+  val topicPrefix = loadConfigOrThrow[String](ConfigKeys.kafkaTopicsPrefix)
+  val cacheInvalidationTopic = topicPrefix + "cacheInvalidation"
 }

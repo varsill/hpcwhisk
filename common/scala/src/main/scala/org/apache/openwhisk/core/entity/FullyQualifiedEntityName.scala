@@ -29,8 +29,12 @@ import org.apache.openwhisk.core.entity.size.SizeString
  * - EntityPath: the namespace and package where the entity is located
  * - EntityName: the name of the entity
  * - Version: the semantic version of the resource
+ * - Binding : the entity path of the package binding, it can be used by entities that support binding
  */
-protected[core] case class FullyQualifiedEntityName(path: EntityPath, name: EntityName, version: Option[SemVer] = None)
+protected[core] case class FullyQualifiedEntityName(path: EntityPath,
+                                                    name: EntityName,
+                                                    version: Option[SemVer] = None,
+                                                    binding: Option[EntityPath] = None)
     extends ByteSizeable {
   private val qualifiedName: String = path + EntityPath.PATHSEP + name
 
@@ -52,6 +56,7 @@ protected[core] case class FullyQualifiedEntityName(path: EntityPath, name: Enti
   def namespace: EntityName = path.root
   def qualifiedNameWithLeadingSlash: String = EntityPath.PATHSEP + qualifiedName
   def asString = path.addPath(name) + version.map("@" + _.toString).getOrElse("")
+  def serialize = FullyQualifiedEntityName.serdes.write(this).compactPrint
 
   override def size = qualifiedName.sizeInBytes
   override def toString = asString
@@ -60,7 +65,7 @@ protected[core] case class FullyQualifiedEntityName(path: EntityPath, name: Enti
 
 protected[core] object FullyQualifiedEntityName extends DefaultJsonProtocol {
   // must use jsonFormat with explicit field names and order because class extends a trait
-  private val caseClassSerdes = jsonFormat(FullyQualifiedEntityName.apply _, "path", "name", "version")
+  private val caseClassSerdes = jsonFormat(FullyQualifiedEntityName.apply _, "path", "name", "version", "binding")
 
   protected[core] val serdes = new RootJsonFormat[FullyQualifiedEntityName] {
     def write(n: FullyQualifiedEntityName) = caseClassSerdes.write(n)
@@ -96,6 +101,8 @@ protected[core] object FullyQualifiedEntityName extends DefaultJsonProtocol {
         case Failure(t)                           => deserializationError("fully qualified name malformed")
       }
   }
+
+  protected[core] def parse(msg: String) = Try(serdes.read(msg.parseJson))
 
   /**
    * Converts the name to a fully qualified name.

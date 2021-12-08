@@ -58,12 +58,13 @@ trait ActionContainer {
 trait ActionProxyContainerTestUtils extends FlatSpec with Matchers with StreamLogging {
   import ActionContainer.{filterSentinel, sentinel}
 
-  def initPayload(code: String, main: String = "main"): JsObject =
+  def initPayload(code: String, main: String = "main", env: Option[Map[String, JsString]] = None): JsObject =
     JsObject(
       "value" -> JsObject(
         "code" -> { if (code != null) JsString(code) else JsNull },
         "main" -> JsString(main),
-        "binary" -> JsBoolean(Exec.isBinaryCode(code))))
+        "binary" -> JsBoolean(Exec.isBinaryCode(code)),
+        "env" -> env.map(JsObject(_)).getOrElse(JsNull)))
 
   def runPayload(args: JsValue, other: Option[JsObject] = None): JsObject =
     JsObject(Map("value" -> args) ++ (other map { _.fields } getOrElse Map.empty))
@@ -150,7 +151,7 @@ object ActionContainer {
         throw new RuntimeException(s"""
               |Unable to connect to docker host using $dockerCmdString as command string.
               |The docker host is determined using the Java property 'docker.host' or
-              |the envirnoment variable 'DOCKER_HOST'. Please verify that one or the
+              |the environment variable 'DOCKER_HOST'. Please verify that one or the
               |other is set for your build/test process.""".stripMargin)
       case Success((v, _, _)) if v == 0 => // Do nothing
       case Failure(t)                   => throw t

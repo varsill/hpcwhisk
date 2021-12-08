@@ -17,7 +17,6 @@
 
 package org.apache.openwhisk.core.invoker.test
 
-import akka.stream.ActorMaterializer
 import common.{StreamLogging, WskActorSystem}
 import org.junit.runner.RunWith
 import org.scalatest.concurrent.{IntegrationPatience, ScalaFutures}
@@ -44,7 +43,6 @@ class NamespaceBlacklistTests
 
   behavior of "NamespaceBlacklist"
 
-  implicit val materializer = ActorMaterializer()
   implicit val tid = TransactionId.testing
 
   val authStore = WhiskAuthStore.datastore()
@@ -69,18 +67,13 @@ class NamespaceBlacklistTests
 
   private def authToIdentities(auth: WhiskAuth): Set[Identity] = {
     auth.namespaces.map { ns =>
-      Identity(auth.subject, ns.namespace, ns.authkey, Set.empty, UserLimits())
+      Identity(auth.subject, ns.namespace, ns.authkey)
     }
   }
 
   private def limitToIdentity(limit: LimitEntity): Identity = {
     val namespace = limit.docid.id.dropRight("/limits".length)
-    Identity(
-      limit.subject,
-      Namespace(EntityName(namespace), UUID()),
-      BasicAuthenticationAuthKey(UUID(), Secret()),
-      Set(),
-      UserLimits())
+    Identity(limit.subject, Namespace(EntityName(namespace), UUID()), BasicAuthenticationAuthKey(UUID(), Secret()))
   }
 
   override def beforeAll() = {

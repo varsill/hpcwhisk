@@ -287,7 +287,7 @@ function deleteApiFromGateway(gwInfo, spaceGuid, apiId) {
 /**
  * Return an array of APIs
  */
-function getApis(gwInfo, spaceGuid, bpOrApiName) {
+function getApis(gwInfo, spaceGuid, bpOrApiName, limit, skip) {
   var qsBasepath = { 'basePath' : bpOrApiName };
   var qsApiName = { 'title' : bpOrApiName };
   var qs;
@@ -302,7 +302,7 @@ function getApis(gwInfo, spaceGuid, bpOrApiName) {
   }
   var options = {
     followAllRedirects: true,
-    url: gwInfo.gwUrl+'/'+encodeURIComponent(spaceGuid)+'/apis',
+    url: gwInfo.gwUrl+'/'+encodeURIComponent(spaceGuid)+'/apis?limit='+limit+'&skip='+skip,
     headers: {
       'Accept': 'application/json',
       'User-Agent': UserAgent
@@ -600,12 +600,13 @@ function getCaseOperationIdx(caseArr, operationId) {
 // Returns:
 //   string               - web-action URL
 function makeWebActionBackendUrl(endpointAction, endpointResponseType, isTargetUrl = false) {
+  protocol = getProtocolFromActionUrl(endpointAction.backendUrl);
   host = getHostFromActionUrl(endpointAction.backendUrl);
   ns = endpointAction.namespace;
   pkg = getPackageNameFromFqActionName(endpointAction.name) || 'default';
   name = getActionNameFromFqActionName(endpointAction.name);
   reqPath = isTargetUrl && endpointResponseType === 'http' ? "$(request.path)" : "";
-  return 'https://' + host + '/api/v1/web/' + ns + '/' + pkg + '/' + name + '.' + endpointResponseType + reqPath;
+  return protocol + '://' + host + '/api/v1/web/' + ns + '/' + pkg + '/' + name + '.' + endpointResponseType + reqPath;
 }
 
 /*
@@ -773,6 +774,14 @@ function getActionNamespaceFromActionUrl(actionUrl) {
  */
 function getHostFromActionUrl(actionUrl) {
   return parseActionUrl(actionUrl)[2];
+}
+
+/*
+ * https://172.17.0.1/api/v1/namespaces/whisk.system/actions/getaction
+ * would return https
+ */
+function getProtocolFromActionUrl(actionUrl) {
+  return parseActionUrl(actionUrl)[1];
 }
 
 /*

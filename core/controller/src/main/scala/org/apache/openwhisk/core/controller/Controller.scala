@@ -21,16 +21,13 @@ import akka.Done
 import akka.actor.{ActorSystem, CoordinatedShutdown}
 import akka.event.Logging.InfoLevel
 import akka.http.scaladsl.marshallers.sprayjson.SprayJsonSupport._
+import akka.http.scaladsl.model.StatusCodes._
 import akka.http.scaladsl.model.Uri
 import akka.http.scaladsl.server.Route
-import akka.stream.ActorMaterializer
 import kamon.Kamon
-import pureconfig.loadConfigOrThrow
-import spray.json.DefaultJsonProtocol._
-import spray.json._
 import org.apache.openwhisk.common.Https.HttpsConfig
-import org.apache.openwhisk.common.{AkkaLogging, ConfigMXBean, Logging, LoggingMarkers, TransactionId}
-import org.apache.openwhisk.core.WhiskConfig
+import org.apache.openwhisk.common._
+import org.apache.openwhisk.core.{ConfigKeys, WhiskConfig}
 import org.apache.openwhisk.core.connector.MessagingProvider
 import org.apache.openwhisk.core.containerpool.logging.LogStoreProvider
 import org.apache.openwhisk.core.database.{ActivationStoreProvider, CacheChangeNotification, RemoteCacheInvalidation}
@@ -38,13 +35,17 @@ import org.apache.openwhisk.core.entitlement._
 import org.apache.openwhisk.core.entity.ActivationId.ActivationIdGenerator
 import org.apache.openwhisk.core.entity.ExecManifest.Runtimes
 import org.apache.openwhisk.core.entity._
-import org.apache.openwhisk.core.loadBalancer.{InvokerState, LoadBalancerProvider}
+import org.apache.openwhisk.core.loadBalancer.LoadBalancerProvider
 import org.apache.openwhisk.http.{BasicHttpService, BasicRasService}
 import org.apache.openwhisk.spi.SpiLoader
+import pureconfig._
+import spray.json.DefaultJsonProtocol._
+import spray.json._
+import pureconfig.generic.auto._
 
+import scala.concurrent.Await
 import scala.concurrent.ExecutionContext.Implicits
 import scala.concurrent.duration.DurationInt
-import scala.concurrent.Await
 import scala.util.{Failure, Success}
 
 /**
@@ -74,7 +75,6 @@ class Controller(val instance: ControllerInstanceId,
                  runtimes: Runtimes,
                  implicit val whiskConfig: WhiskConfig,
                  implicit val actorSystem: ActorSystem,
-                 implicit val materializer: ActorMaterializer,
                  implicit val logging: Logging)
     extends BasicRasService {
 
@@ -88,6 +88,7 @@ class Controller(val instance: ControllerInstanceId,
    * A Route in Akka is technically a function taking a RequestContext as a parameter.
    *
    * The "~" Akka DSL operator composes two independent Routes, building a routing tree structure.
+   *
    * @see http://doc.akka.io/docs/akka-http/current/scala/http/routing-dsl/routes.html#composing-routes
    */
   override def routes(implicit transid: TransactionId): Route = {
@@ -119,7 +120,7 @@ class Controller(val instance: ControllerInstanceId,
   private implicit val activationIdFactory = new ActivationIdGenerator {}
   private implicit val logStore = SpiLoader.get[LogStoreProvider].instance(actorSystem)
   private implicit val activationStore =
-    SpiLoader.get[ActivationStoreProvider].instance(actorSystem, materializer, logging)
+    SpiLoader.get[ActivationStoreProvider].instance(actorSystem, logging)
 
   // register collections
   Collection.initialize(entityStore)
@@ -130,12 +131,14 @@ class Controller(val instance: ControllerInstanceId,
   private val swagger = new SwaggerDocs(Uri.Path.Empty, "infoswagger.json")
 
   /**
-   * Handles GET /invokers
-   *             /invokers/healthy/count
+   * Handles GET /invokers - list of invokers
+   *             /invokers/healthy/count - nr of healthy invokers
+   *             /invokers/ready - 200 in case # of healthy invokers are above the expected value
+   *                             - 500 in case # of healthy invokers are bellow the expected value
    *
    * @return JSON with details of invoker health or count of healthy invokers respectively.
    */
-  private val internalInvokerHealth = {
+  protected[controller] val internalInvokerHealth = {
     implicit val executionContext = actorSystem.dispatcher
     (pathPrefix("invokers") & get) {
       pathEndOrSingleSlash {
@@ -149,6 +152,16 @@ class Controller(val instance: ControllerInstanceId,
           loadBalancer
             .invokerHealth()
             .map(_.count(_.status == InvokerState.Healthy).toJson)
+        }
+      } ~ path("ready") {
+        onSuccess(loadBalancer.invokerHealth()) { invokersHealth =>
+          val all = invokersHealth.size
+          val healthy = invokersHealth.count(_.status == InvokerState.Healthy)
+          val ready = Controller.readyState(all, healthy, Controller.readinessThreshold.getOrElse(1))
+          if (ready)
+            complete(JsObject("healthy" -> s"$healthy/$all".toJson))
+          else
+            complete(InternalServerError -> JsObject("unhealthy" -> s"${all - healthy}/$all".toJson))
         }
       }
     }
@@ -170,13 +183,17 @@ class Controller(val instance: ControllerInstanceId,
 object Controller {
 
   protected val protocol = loadConfigOrThrow[String]("whisk.controller.protocol")
+  protected val interface = loadConfigOrThrow[String]("whisk.controller.interface")
+  protected val readinessThreshold = loadConfig[Double]("whisk.controller.readiness-fraction")
+
+  val topicPrefix = loadConfigOrThrow[String](ConfigKeys.kafkaTopicsPrefix)
+  val userEventTopicPrefix = loadConfigOrThrow[String](ConfigKeys.kafkaTopicsUserEventPrefix)
 
   // requiredProperties is a Map whose keys define properties that must be bound to
   // a value, and whose values are default values.   A null value in the Map means there is
   // no default value specified, so it must appear in the properties file
   def requiredProperties =
-    Map(WhiskConfig.controllerInstances -> null) ++
-      ExecManifest.requiredProperties ++
+    ExecManifest.requiredProperties ++
       RestApiCommons.requiredProperties ++
       SpiLoader.get[LoadBalancerProvider].requiredProperties ++
       EntitlementProvider.requiredProperties
@@ -190,7 +207,7 @@ object Controller {
     JsObject(
       "description" -> "OpenWhisk".toJson,
       "support" -> JsObject(
-        "github" -> "https://github.com/apache/incubator-openwhisk/issues".toJson,
+        "github" -> "https://github.com/apache/openwhisk/issues".toJson,
         "slack" -> "http://slack.openwhisk.org".toJson),
       "api_paths" -> apis.toJson,
       "limits" -> JsObject(
@@ -206,16 +223,24 @@ object Controller {
         "max_action_logs" -> logLimit.max.toBytes.toJson),
       "runtimes" -> runtimes.toJson)
 
+  def readyState(allInvokers: Int, healthyInvokers: Int, readinessThreshold: Double): Boolean = {
+    if (allInvokers > 0) (healthyInvokers / allInvokers) >= readinessThreshold else false
+  }
+
   def main(args: Array[String]): Unit = {
-    ConfigMXBean.register()
-    Kamon.loadReportersFromConfig()
     implicit val actorSystem = ActorSystem("controller-actor-system")
     implicit val logger = new AkkaLogging(akka.event.Logging.getLogger(actorSystem, this))
+    start(args)
+  }
+
+  def start(args: Array[String])(implicit actorSystem: ActorSystem, logger: Logging): Unit = {
+    ConfigMXBean.register()
+    Kamon.init()
 
     // Prepare Kamon shutdown
     CoordinatedShutdown(actorSystem).addTask(CoordinatedShutdown.PhaseActorSystemTerminate, "shutdownKamon") { () =>
       logger.info(this, s"Shutting down Kamon with coordinated shutdown")
-      Kamon.stopAllReporters().map(_ => Done)(Implicits.global)
+      Kamon.stopModules().map(_ => Done)(Implicits.global)
     }
 
     // extract configuration data from the environment
@@ -240,10 +265,10 @@ object Controller {
     val msgProvider = SpiLoader.get[MessagingProvider]
 
     Seq(
-      ("completed" + instance.asString, "completed", Some(ActivationEntityLimit.MAX_ACTIVATION_LIMIT)),
-      ("health", "health", None),
-      ("cacheInvalidation", "cache-invalidation", None),
-      ("events", "events", None)).foreach {
+      (topicPrefix + "completed" + instance.asString, "completed", Some(ActivationEntityLimit.MAX_ACTIVATION_LIMIT)),
+      (topicPrefix + "health", "health", None),
+      (topicPrefix + "cacheInvalidation", "cache-invalidation", None),
+      (userEventTopicPrefix + "events", "events", None)).foreach {
       case (topic, topicConfigurationKey, maxMessageBytes) =>
         if (msgProvider.ensureTopic(config, topic, topicConfigurationKey, maxMessageBytes).isFailure) {
           abort(s"failure during msgProvider.ensureTopic for topic $topic")
@@ -252,18 +277,12 @@ object Controller {
 
     ExecManifest.initialize(config) match {
       case Success(_) =>
-        val controller = new Controller(
-          instance,
-          ExecManifest.runtimesManifest,
-          config,
-          actorSystem,
-          ActorMaterializer.create(actorSystem),
-          logger)
+        val controller = new Controller(instance, ExecManifest.runtimesManifest, config, actorSystem, logger)
 
         val httpsConfig =
           if (Controller.protocol == "https") Some(loadConfigOrThrow[HttpsConfig]("whisk.controller.https")) else None
 
-        BasicHttpService.startHttpService(controller.route, port, httpsConfig)(actorSystem, controller.materializer)
+        BasicHttpService.startHttpService(controller.route, port, httpsConfig, interface)(actorSystem)
 
       case Failure(t) =>
         abort(s"Invalid runtimes manifest: $t")

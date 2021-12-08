@@ -18,18 +18,18 @@
 package org.apache.openwhisk.core.loadBalancer
 
 import akka.actor.{ActorRef, ActorSystem, Props}
-import akka.stream.ActorMaterializer
 import org.apache.openwhisk.common._
 import org.apache.openwhisk.core.WhiskConfig._
 import org.apache.openwhisk.core.connector._
 import org.apache.openwhisk.core.containerpool.ContainerPoolConfig
 import org.apache.openwhisk.core.entity.ControllerInstanceId
 import org.apache.openwhisk.core.entity._
-import org.apache.openwhisk.core.invoker.InvokerReactive
+import org.apache.openwhisk.core.invoker.InvokerProvider
 import org.apache.openwhisk.core.{ConfigKeys, WhiskConfig}
 import org.apache.openwhisk.spi.SpiLoader
 import org.apache.openwhisk.utils.ExecutionContextFactory
 import pureconfig._
+import pureconfig.generic.auto._
 import org.apache.openwhisk.core.entity.size._
 
 import scala.concurrent.Future
@@ -45,8 +45,7 @@ class LeanBalancer(config: WhiskConfig,
                    controllerInstance: ControllerInstanceId,
                    implicit val messagingProvider: MessagingProvider = SpiLoader.get[MessagingProvider])(
   implicit actorSystem: ActorSystem,
-  logging: Logging,
-  materializer: ActorMaterializer)
+  logging: Logging)
     extends CommonLoadBalancer(config, feedFactory, controllerInstance) {
 
   /** Loadbalancer interface methods */
@@ -67,11 +66,10 @@ class LeanBalancer(config: WhiskConfig,
   }
 
   /** Creates an invoker for executing user actions. There is only one invoker in the lean model. */
-  private def makeALocalThreadedInvoker() {
+  private def makeALocalThreadedInvoker(): Unit = {
     implicit val ec = ExecutionContextFactory.makeCachedThreadPoolExecutionContext()
-    val actorSystema: ActorSystem =
-      ActorSystem(name = "invoker-actor-system", defaultExecutionContext = Some(ec))
-    new InvokerReactive(config, invokerName, messageProducer)(actorSystema, implicitly)
+    val limitConfig: ConcurrencyLimitConfig = loadConfigOrThrow[ConcurrencyLimitConfig](ConfigKeys.concurrencyLimit)
+    SpiLoader.get[InvokerProvider].instance(config, invokerName, messageProducer, poolConfig, limitConfig)
   }
 
   makeALocalThreadedInvoker()
@@ -82,23 +80,20 @@ class LeanBalancer(config: WhiskConfig,
     // Currently do nothing
   }
 
-  override protected def emitHistogramMetric() = {
-    super.emitHistogramMetric()
+  override protected def emitMetrics() = {
+    super.emitMetrics()
   }
 }
 
 object LeanBalancer extends LoadBalancerProvider {
 
-  override def instance(whiskConfig: WhiskConfig, instance: ControllerInstanceId)(
-    implicit actorSystem: ActorSystem,
-    logging: Logging,
-    materializer: ActorMaterializer): LoadBalancer = {
+  override def instance(whiskConfig: WhiskConfig, instance: ControllerInstanceId)(implicit actorSystem: ActorSystem,
+                                                                                  logging: Logging): LoadBalancer = {
 
     new LeanBalancer(whiskConfig, createFeedFactory(whiskConfig, instance), instance)
   }
 
   def requiredProperties =
-    Map(runtimesRegistry -> "") ++
-      ExecManifest.requiredProperties ++
+    ExecManifest.requiredProperties ++
       wskApiHost
 }

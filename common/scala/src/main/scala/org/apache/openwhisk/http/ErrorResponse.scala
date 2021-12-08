@@ -71,6 +71,7 @@ object Messages {
     s"Too many requests in the last minute (count: $count, allowed: $allowed)."
 
   /** Standard message for too many concurrent activation requests within a time window. */
+  val tooManyConcurrentRequests = s"Too many concurrent requests in flight."
   def tooManyConcurrentRequests(count: Int, allowed: Int) =
     s"Too many concurrent requests in flight (count: $count, allowed: $allowed)."
 
@@ -96,6 +97,12 @@ object Messages {
   /** Standard error for malformed activation id. */
   val activationIdIllegal = "The activation id is not valid."
   def activationIdLengthError(error: SizeError) = {
+    s"${error.field} length is ${error.is.toBytes} but must be ${error.allowed.toBytes}."
+  }
+
+  /** Standard error for malformed creation id. */
+  val creationIdIllegal = "The creation id is not valid."
+  def creationIdLengthError(error: SizeError) = {
     s"${error.field} length is ${error.is.toBytes} but must be ${error.allowed.toBytes}."
   }
 
@@ -156,6 +163,11 @@ object Messages {
   def listLimitOutOfRange(collection: String, value: Int, max: Int) = {
     s"The value '$value' is not in the range of 0 to $max for $collection."
   }
+
+  def invalidRuntimeError(kind: String, runtimes: Set[String]) = {
+    s"The specified runtime '$kind' is not supported by this platform. Valid values are: ${runtimes.mkString("'", "', '", "'")}."
+  }
+
   def listSkipOutOfRange(collection: String, value: Int) = {
     s"The value '$value' is not greater than or equal to 0 for $collection."
   }
@@ -165,6 +177,8 @@ object Messages {
     s"Logs were truncated because the total bytes size exceeds the limit of ${limit.toBytes} bytes."
   }
   val logFailure = "There was an issue while collecting your logs. Data might be missing."
+
+  val logWarningDeveloperError = "The action did not initialize or run as expected. Log data might be missing."
 
   /** Error for meta api. */
   val propertyNotFound = "Response does not include requested property."
@@ -212,6 +226,7 @@ object Messages {
   }
 
   val namespacesBlacklisted = "The action was not invoked due to a blacklisted namespace."
+  val namespaceLimitUnderZero = "The namespace limit is less than or equal to 0."
 
   val actionRemovedWhileInvoking = "Action could not be found or may have been deleted."
   val actionMismatchWhileInvoking = "Action version is not compatible and cannot be invoked."
@@ -222,6 +237,15 @@ object Messages {
 
   /** Indicates that the container for the action could not be started. */
   val resourceProvisionError = "Failed to provision resources to run the action."
+
+  def forbiddenGetActionBinding(entityDocId: String) =
+    s"GET not permitted for '$entityDocId'. Resource does not exist or is an action in a shared package binding."
+  def forbiddenGetAction(entityPath: String) =
+    s"GET not permitted for '$entityPath' since it's an action in a shared package"
+  def forbiddenGetPackageBinding(packageName: String) =
+    s"GET not permitted since $packageName is a binding of a shared package"
+  def forbiddenGetPackage(packageName: String) =
+    s"GET not permitted for '$packageName' since it's a shared package"
 }
 
 /** Replaces rejections with Json object containing cause and transaction id. */
@@ -253,7 +277,7 @@ object ErrorResponse extends Directives with DefaultJsonProtocol {
     case _         => ErrorResponse(status.defaultMessage, transid)
   }
 
-  implicit val serializer = new RootJsonFormat[ErrorResponse] {
+  implicit val serializer: RootJsonFormat[ErrorResponse] = new RootJsonFormat[ErrorResponse] {
     def write(er: ErrorResponse) = JsObject("error" -> er.error.toJson, "code" -> er.code.meta.id.toJson)
 
     def read(v: JsValue) =

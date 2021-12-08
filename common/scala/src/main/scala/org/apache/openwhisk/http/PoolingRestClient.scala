@@ -24,7 +24,7 @@ import akka.http.scaladsl.marshalling._
 import akka.http.scaladsl.model._
 import akka.http.scaladsl.settings.ConnectionPoolSettings
 import akka.http.scaladsl.unmarshalling._
-import akka.stream.{ActorMaterializer, OverflowStrategy, QueueOfferResult}
+import akka.stream.{OverflowStrategy, QueueOfferResult}
 import akka.stream.scaladsl.{Flow, _}
 import spray.json._
 import scala.concurrent.{ExecutionContext, Future, Promise}
@@ -49,13 +49,17 @@ class PoolingRestClient(
   require(protocol == "http" || protocol == "https", "Protocol must be one of { http, https }.")
 
   protected implicit val context: ExecutionContext = system.dispatcher
-  protected implicit val materializer: ActorMaterializer = ActorMaterializer()
 
   //if specified, override the ClientConnection idle-timeout and keepalive socket option value
   private val timeoutSettings = {
-    ConnectionPoolSettings(system.settings.config).withUpdatedConnectionSettings { s =>
-      timeout.map(t => s.withIdleTimeout(t)).getOrElse(s)
-    }
+    val cps = ConnectionPoolSettings(system.settings.config)
+    timeout
+      .map { t =>
+        cps
+          .withMaxConnectionBackoff(cps.maxConnectionBackoff.min(t))
+          .withUpdatedConnectionSettings(_.withIdleTimeout(t))
+      }
+      .getOrElse(cps)
   }
 
   // Creates or retrieves a connection pool for the host.
@@ -110,13 +114,20 @@ class PoolingRestClient(
       if (response.status.isSuccess) {
         Unmarshal(response.entity.withoutSizeLimit).to[T].map(Right.apply)
       } else {
-        // This is important, as it drains the entity stream.
-        // Otherwise the connection stays open and the pool dries up.
-        response.discardEntityBytes().future.map(_ => Left(response.status))
+        Unmarshal(response.entity).to[String].flatMap { body =>
+          val statusCode = response.status
+          val reason =
+            if (body.nonEmpty) s"${statusCode.reason} (details: $body)" else statusCode.reason
+          val customStatusCode = StatusCodes
+            .custom(intValue = statusCode.intValue, reason = reason, defaultMessage = statusCode.defaultMessage)
+          // This is important, as it drains the entity stream.
+          // Otherwise the connection stays open and the pool dries up.
+          response.discardEntityBytes().future.map(_ => Left(customStatusCode))
+        }
       }
     }
 
-  def shutdown(): Future[Unit] = Future.successful(materializer.shutdown())
+  def shutdown(): Future[Unit] = Future.unit
 }
 
 object PoolingRestClient {

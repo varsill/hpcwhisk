@@ -23,9 +23,8 @@ SCRIPTDIR=$(cd $(dirname "$0") && pwd)
 ROOTDIR="$SCRIPTDIR/../.."
 
 cd $ROOTDIR/tools/travis
+export TESTCONTAINERS_RYUK_DISABLED="true"
 export ORG_GRADLE_PROJECT_testSetName="REQUIRE_ONLY_DB"
-
-./scan.sh
 
 ./setupPrereq.sh
 
@@ -33,5 +32,7 @@ cat "$ROOTDIR/tests/src/test/resources/application.conf"
 
 ./distDocker.sh
 
-./runTests.sh
+# yet another hack to hit docker rate limits early...
+docker pull alpine:3.5
 
+./runTests.sh

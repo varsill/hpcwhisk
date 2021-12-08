@@ -18,27 +18,18 @@
 package org.apache.openwhisk.core.database
 
 import akka.actor.ActorSystem
-import akka.stream.ActorMaterializer
-import org.rogach.scallop.{ScallopConfBase, Subcommand}
-import spray.json.{JsObject, JsString, JsValue, RootJsonFormat}
 import org.apache.openwhisk.common.{Logging, TransactionId}
 import org.apache.openwhisk.core.cli.{CommandError, CommandMessages, IllegalState, WhiskCommand}
 import org.apache.openwhisk.core.database.LimitsCommand.LimitEntity
 import org.apache.openwhisk.core.entity.types.AuthStore
-import org.apache.openwhisk.core.entity.{
-  DocId,
-  DocInfo,
-  DocRevision,
-  EntityName,
-  Subject,
-  UserLimits,
-  WhiskAuth,
-  WhiskDocumentReader
-}
+import org.apache.openwhisk.core.entity._
 import org.apache.openwhisk.http.Messages
 import org.apache.openwhisk.spi.SpiLoader
+import org.rogach.scallop.{ScallopConfBase, Subcommand}
+import spray.json.{JsObject, JsString, JsValue, RootJsonFormat}
 
 import scala.concurrent.{ExecutionContext, Future}
+import scala.language.reflectiveCalls
 import scala.reflect.classTag
 import scala.util.{Properties, Try}
 
@@ -50,7 +41,7 @@ class LimitsCommand extends Subcommand("limits") with WhiskCommand {
 
     val namespace = trailArg[String](descr = "the namespace to set limits for")
 
-    //name is explicitly mentioned for backward compatability
+    //name is explicitly mentioned for backward compatibility
     //otherwise scallop would convert it to - separated names
     val invocationsPerMinute =
       opt[Int](
@@ -115,7 +106,6 @@ class LimitsCommand extends Subcommand("limits") with WhiskCommand {
 
   def exec(cmd: ScallopConfBase)(implicit system: ActorSystem,
                                  logging: Logging,
-                                 materializer: ActorMaterializer,
                                  transid: TransactionId): Future[Either[CommandError, String]] = {
     implicit val executionContext = system.dispatcher
     val authStore = LimitsCommand.createDataStore()
@@ -183,12 +173,10 @@ class LimitsCommand extends Subcommand("limits") with WhiskCommand {
 object LimitsCommand {
   def limitIdOf(name: EntityName) = DocId(s"${name.name}/limits")
 
-  def createDataStore()(implicit system: ActorSystem,
-                        logging: Logging,
-                        materializer: ActorMaterializer): ArtifactStore[WhiskAuth] =
+  def createDataStore()(implicit system: ActorSystem, logging: Logging): ArtifactStore[WhiskAuth] =
     SpiLoader
       .get[ArtifactStoreProvider]
-      .makeStore[WhiskAuth]()(classTag[WhiskAuth], LimitsFormat, WhiskDocumentReader, system, logging, materializer)
+      .makeStore[WhiskAuth]()(classTag[WhiskAuth], LimitsFormat, WhiskDocumentReader, system, logging)
 
   class LimitEntity(val name: EntityName, val limits: UserLimits) extends WhiskAuth(Subject(), Set.empty) {
     override def docid: DocId = limitIdOf(name)

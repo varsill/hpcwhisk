@@ -18,37 +18,43 @@
 package org.apache.openwhisk.core.containerpool.kubernetes
 
 import akka.actor.ActorSystem
-import pureconfig.loadConfigOrThrow
+import pureconfig._
+import pureconfig.generic.auto._
 
 import scala.concurrent.Await
 import scala.concurrent.ExecutionContext
 import scala.concurrent.Future
 import scala.concurrent.duration._
-
 import org.apache.openwhisk.common.Logging
 import org.apache.openwhisk.common.TransactionId
-import org.apache.openwhisk.core.containerpool.Container
-import org.apache.openwhisk.core.containerpool.ContainerFactory
-import org.apache.openwhisk.core.containerpool.ContainerFactoryProvider
+import org.apache.openwhisk.core.containerpool.{
+  Container,
+  ContainerArgsConfig,
+  ContainerFactory,
+  ContainerFactoryProvider,
+  RuntimesRegistryConfig
+}
 import org.apache.openwhisk.core.entity.ByteSize
 import org.apache.openwhisk.core.entity.ExecManifest.ImageName
 import org.apache.openwhisk.core.entity.InvokerInstanceId
+import org.apache.openwhisk.core.entity.size._
 import org.apache.openwhisk.core.{ConfigKeys, WhiskConfig}
 
-class KubernetesContainerFactory(label: String, config: WhiskConfig)(implicit actorSystem: ActorSystem,
-                                                                     ec: ExecutionContext,
-                                                                     logging: Logging)
+class KubernetesContainerFactory(
+  label: String,
+  config: WhiskConfig,
+  containerArgsConfig: ContainerArgsConfig = loadConfigOrThrow[ContainerArgsConfig](ConfigKeys.containerArgs),
+  runtimesRegistryConfig: RuntimesRegistryConfig =
+    loadConfigOrThrow[RuntimesRegistryConfig](ConfigKeys.runtimesRegistry),
+  userImagesRegistryConfig: RuntimesRegistryConfig = loadConfigOrThrow[RuntimesRegistryConfig](
+    ConfigKeys.userImagesRegistry))(implicit actorSystem: ActorSystem, ec: ExecutionContext, logging: Logging)
     extends ContainerFactory {
 
   implicit val kubernetes = initializeKubeClient()
 
   private def initializeKubeClient(): KubernetesClient = {
     val config = loadConfigOrThrow[KubernetesClientConfig](ConfigKeys.kubernetes)
-    if (config.invokerAgent.enabled) {
-      new KubernetesClientWithInvokerAgent(config)(ec)
-    } else {
-      new KubernetesClient(config)(ec)
-    }
+    new KubernetesClient(config)(ec)
   }
 
   /** Perform cleanup on init */
@@ -56,8 +62,9 @@ class KubernetesContainerFactory(label: String, config: WhiskConfig)(implicit ac
 
   override def cleanup() = {
     logging.info(this, "Cleaning up function runtimes")
-    val cleaning = kubernetes.rm("invoker", label, true)(TransactionId.invokerNanny)
-    Await.ready(cleaning, 30.seconds)
+    val labels = Map("invoker" -> label, "release" -> KubernetesContainerFactoryProvider.release)
+    val cleaning = kubernetes.rm(labels, true)(TransactionId.invokerNanny)
+    Await.ready(cleaning, KubernetesContainerFactoryProvider.runtimeDeleteTimeout)
   }
 
   override def createContainer(tid: TransactionId,
@@ -66,11 +73,8 @@ class KubernetesContainerFactory(label: String, config: WhiskConfig)(implicit ac
                                userProvidedImage: Boolean,
                                memory: ByteSize,
                                cpuShares: Int)(implicit config: WhiskConfig, logging: Logging): Future[Container] = {
-    val image = if (userProvidedImage) {
-      actionImage.publicImageName
-    } else {
-      actionImage.localImageName(config.runtimesRegistry)
-    }
+    val image = actionImage.resolveImageName(Some(
+      ContainerFactory.resolveRegistryConfig(userProvidedImage, runtimesRegistryConfig, userImagesRegistryConfig).url))
 
     KubernetesContainer.create(
       tid,
@@ -78,12 +82,16 @@ class KubernetesContainerFactory(label: String, config: WhiskConfig)(implicit ac
       image,
       userProvidedImage,
       memory,
-      environment = Map("__OW_API_HOST" -> config.wskApiHost),
-      labels = Map("invoker" -> label))
+      environment = Map("__OW_API_HOST" -> config.wskApiHost) ++ containerArgsConfig.extraEnvVarMap,
+      labels = Map("invoker" -> label, "release" -> KubernetesContainerFactoryProvider.release))
   }
 }
 
 object KubernetesContainerFactoryProvider extends ContainerFactoryProvider {
+
+  val release = loadConfigOrThrow[String]("whisk.helm.release")
+  val runtimeDeleteTimeout = loadConfigOrThrow[FiniteDuration]("whisk.runtime.delete.timeout")
+
   override def instance(actorSystem: ActorSystem,
                         logging: Logging,
                         config: WhiskConfig,

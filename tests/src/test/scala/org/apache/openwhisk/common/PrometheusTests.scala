@@ -16,7 +16,7 @@
  */
 
 package org.apache.openwhisk.common
-import akka.http.scaladsl.coding.Gzip
+import akka.http.scaladsl.coding.{Coders}
 import akka.http.scaladsl.model.{HttpCharsets, HttpResponse}
 import akka.http.scaladsl.model.headers.HttpEncodings.gzip
 import akka.http.scaladsl.model.headers.{`Accept-Encoding`, `Content-Encoding`, HttpEncoding, HttpEncodings}
@@ -55,7 +55,7 @@ class PrometheusTests extends FlatSpec with Matchers with ScalatestRouteTest wit
 
   it should "respond to /metrics" in {
     val api = new KamonPrometheus
-    Kamon.counter("foo_bar").increment(42)
+    Kamon.counter("foo_bar").withoutTags().increment(42)
 
     //Sleep to ensure that Kamon metrics are pushed to reporters
     Thread.sleep(2.seconds.toMillis)
@@ -65,7 +65,7 @@ class PrometheusTests extends FlatSpec with Matchers with ScalatestRouteTest wit
       contentType.mediaType.params("version") shouldBe "0.0.4"
       response should haveContentEncoding(gzip)
 
-      val responseText = Unmarshal(Gzip.decodeMessage(response)).to[String].futureValue
+      val responseText = Unmarshal(Coders.Gzip.decodeMessage(response)).to[String].futureValue
       withClue(responseText) {
         responseText should include("foo_bar")
       }

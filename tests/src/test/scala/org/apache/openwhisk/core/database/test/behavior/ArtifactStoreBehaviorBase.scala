@@ -19,12 +19,11 @@ package org.apache.openwhisk.core.database.test.behavior
 
 import java.time.Instant
 
-import akka.stream.ActorMaterializer
 import common.{StreamLogging, WskActorSystem}
 import org.scalatest.concurrent.{IntegrationPatience, ScalaFutures}
 import org.scalatest.{BeforeAndAfterAll, BeforeAndAfterEach, FlatSpec, Matchers}
 import spray.json.{JsObject, JsValue}
-import org.apache.openwhisk.common.TransactionId
+import org.apache.openwhisk.common.{TransactionId, WhiskInstants}
 import org.apache.openwhisk.core.database.memory.MemoryAttachmentStore
 import org.apache.openwhisk.core.database.test.DbUtils
 import org.apache.openwhisk.core.database.test.behavior.ArtifactStoreTestUtil.storeAvailable
@@ -44,12 +43,11 @@ trait ArtifactStoreBehaviorBase
     with WskActorSystem
     with IntegrationPatience
     with BeforeAndAfterEach
-    with BeforeAndAfterAll {
+    with BeforeAndAfterAll
+    with WhiskInstants {
 
   //Bring in sync the timeout used by ScalaFutures and DBUtils
   implicit override val patienceConfig: PatienceConfig = PatienceConfig(timeout = dbOpTimeout)
-
-  protected implicit val materializer: ActorMaterializer = ActorMaterializer()
 
   protected val prefix = s"artifactTCK_${Random.alphanumeric.take(4).mkString}"
 

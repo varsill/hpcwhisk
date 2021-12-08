@@ -31,10 +31,10 @@ import akka.http.scaladsl.Http
 import akka.http.scaladsl.model.HttpRequest
 import akka.http.scaladsl.model.StatusCodes
 import akka.http.scaladsl.unmarshalling.Unmarshal
-import akka.stream.ActorMaterializer
 import common._
 import common.rest.{HttpConnection, WskRestOperations}
 import pureconfig._
+import pureconfig.generic.auto._
 import spray.json._
 import spray.json.DefaultJsonProtocol._
 import org.apache.openwhisk.core.WhiskConfig
@@ -57,13 +57,12 @@ class ShootComponentsTests
   val wsk = new WskRestOperations
   val defaultAction = Some(TestUtils.getTestActionFilename("hello.js"))
 
-  implicit val materializer = ActorMaterializer()
   implicit val testConfig = PatienceConfig(1.minute)
 
   val controllerProtocol = loadConfigOrThrow[String]("whisk.controller.protocol")
 
   // Throttle requests to the remaining controllers to avoid getting 429s. (60 req/min)
-  val amountOfControllers = WhiskProperties.getProperty(WhiskConfig.controllerInstances).toInt
+  val amountOfControllers = WhiskProperties.getControllerInstances
   val limit = WhiskProperties.getProperty(WhiskConfig.actionInvokePerMinuteLimit).toDouble
   val limitPerController = limit / amountOfControllers
   val allowedRequestsPerMinute = (amountOfControllers - 1.0) * limitPerController

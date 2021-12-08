@@ -43,7 +43,8 @@ import akka.testkit.TestKit
 import akka.testkit.TestProbe
 import akka.util.Timeout
 import common.{LoggedFunction, StreamLogging}
-import org.apache.openwhisk.common.TransactionId
+import org.apache.openwhisk.common.InvokerState.{Healthy, Offline, Unhealthy, Unresponsive}
+import org.apache.openwhisk.common.{InvokerHealth, InvokerState, TransactionId}
 import org.apache.openwhisk.core.WhiskConfig
 import org.apache.openwhisk.core.connector.ActivationMessage
 import org.apache.openwhisk.core.connector.PingMessage
@@ -52,16 +53,12 @@ import org.apache.openwhisk.core.entity._
 import org.apache.openwhisk.core.entity.size._
 import org.apache.openwhisk.core.loadBalancer.ActivationRequest
 import org.apache.openwhisk.core.loadBalancer.GetStatus
-import org.apache.openwhisk.core.loadBalancer.InvokerState._
 import org.apache.openwhisk.core.loadBalancer.InvocationFinishedResult
 import org.apache.openwhisk.core.loadBalancer.InvocationFinishedMessage
 import org.apache.openwhisk.core.loadBalancer.InvokerActor
 import org.apache.openwhisk.core.loadBalancer.InvokerPool
-import org.apache.openwhisk.core.loadBalancer.InvokerState
-import org.apache.openwhisk.core.loadBalancer.InvokerHealth
 import org.apache.openwhisk.utils.retry
 import org.apache.openwhisk.core.connector.test.TestConnector
-import org.apache.openwhisk.core.entitlement.Privilege
 import org.apache.openwhisk.core.entity.ControllerInstanceId
 
 @RunWith(classOf[JUnitRunner])
@@ -79,7 +76,7 @@ class InvokerSupervisionTests
 
   ExecManifest.initialize(config)
 
-  override def afterAll {
+  override def afterAll: Unit = {
     TestKit.shutdownActorSystem(system)
   }
 
@@ -191,12 +188,13 @@ class InvokerSupervisionTests
       user = Identity(
         Subject("unhealthyInvokerCheck"),
         Namespace(EntityName("unhealthyInvokerCheck"), uuid),
-        BasicAuthenticationAuthKey(uuid, Secret()),
-        Set[Privilege]()),
+        BasicAuthenticationAuthKey(uuid, Secret())),
       activationId = new ActivationIdGenerator {}.make(),
       rootControllerIndex = ControllerInstanceId("0"),
       blocking = false,
-      content = None)
+      content = None,
+      initArgs = Set.empty,
+      lockedArgs = Map.empty)
     val msg = ActivationRequest(activationMessage, invokerInstance)
 
     supervisor ! msg
@@ -206,6 +204,54 @@ class InvokerSupervisionTests
   }
 
   behavior of "InvokerActor"
+
+  it should "start and stay unhealthy while min threshold is not met" in {
+    val invoker =
+      TestFSMRef(new InvokerActor(InvokerInstanceId(0, userMemory = defaultUserMemory), ControllerInstanceId("0")))
+    invoker.stateName shouldBe Unhealthy
+
+    (1 to InvokerActor.bufferErrorTolerance + 1).foreach { _ =>
+      invoker ! InvocationFinishedMessage(
+        InvokerInstanceId(0, userMemory = defaultUserMemory),
+        InvocationFinishedResult.SystemError)
+      invoker.stateName shouldBe Unhealthy
+    }
+
+    (1 to InvokerActor.bufferSize - InvokerActor.bufferErrorTolerance - 1).foreach { _ =>
+      invoker ! InvocationFinishedMessage(
+        InvokerInstanceId(0, userMemory = defaultUserMemory),
+        InvocationFinishedResult.Success)
+      invoker.stateName shouldBe Unhealthy
+    }
+
+    invoker ! InvocationFinishedMessage(
+      InvokerInstanceId(0, userMemory = defaultUserMemory),
+      InvocationFinishedResult.Success)
+    invoker.stateName shouldBe Healthy
+  }
+
+  it should "revert to unhealthy during initial startup if there is a failed test activation" in {
+    assume(InvokerActor.bufferErrorTolerance >= 3)
+
+    val invoker =
+      TestFSMRef(new InvokerActor(InvokerInstanceId(0, userMemory = defaultUserMemory), ControllerInstanceId("0")))
+    invoker.stateName shouldBe Unhealthy
+
+    invoker ! InvocationFinishedMessage(
+      InvokerInstanceId(0, userMemory = defaultUserMemory),
+      InvocationFinishedResult.SystemError)
+    invoker.stateName shouldBe Unhealthy
+
+    invoker ! InvocationFinishedMessage(
+      InvokerInstanceId(0, userMemory = defaultUserMemory),
+      InvocationFinishedResult.Success)
+    invoker.stateName shouldBe Healthy
+
+    invoker ! InvocationFinishedMessage(
+      InvokerInstanceId(0, userMemory = defaultUserMemory),
+      InvocationFinishedResult.SystemError)
+    invoker.stateName shouldBe Unhealthy
+  }
 
   // unHealthy -> offline
   // offline -> unhealthy
@@ -318,7 +364,7 @@ class InvokerSupervisionTests
     }
   }
 
-  it should "start timer to send testactions when unhealthy" in {
+  it should "start timer to send test actions when unhealthy" in {
     val invoker =
       TestFSMRef(new InvokerActor(InvokerInstanceId(0, userMemory = defaultUserMemory), ControllerInstanceId("0")))
     invoker.stateName shouldBe Unhealthy
@@ -337,7 +383,6 @@ class InvokerSupervisionTests
   }
 
   it should "initially store invoker status with its full id - instance/uniqueName/displayedName" in {
-
     val invoker0 = TestProbe()
     val children = mutable.Queue(invoker0.ref)
     val childFactory = (f: ActorRefFactory, instance: InvokerInstanceId) => children.dequeue()

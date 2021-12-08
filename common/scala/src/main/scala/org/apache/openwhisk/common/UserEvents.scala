@@ -17,7 +17,8 @@
 
 package org.apache.openwhisk.common
 
-import pureconfig.loadConfigOrThrow
+import pureconfig._
+import pureconfig.generic.auto._
 import org.apache.openwhisk.core.ConfigKeys
 import org.apache.openwhisk.core.connector.{EventMessage, MessageProducer}
 
@@ -27,9 +28,11 @@ object UserEvents {
 
   val enabled = loadConfigOrThrow[UserEventsConfig](ConfigKeys.userEvents).enabled
 
+  val userEventTopicPrefix = loadConfigOrThrow[String](ConfigKeys.kafkaTopicsUserEventPrefix)
+
   def send(producer: MessageProducer, em: => EventMessage) = {
     if (enabled) {
-      producer.send("events", em)
+      producer.send(userEventTopicPrefix + "events", em)
     }
   }
 }

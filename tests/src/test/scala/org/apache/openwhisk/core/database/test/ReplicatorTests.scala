@@ -100,7 +100,7 @@ class ReplicatorTests
 
     val Seq(created, deletedDoc, deleted) =
       Seq("create backup: ", "deleting backup document: ", "deleting backup: ").map { prefix =>
-        rr.stdout.lines.collect {
+        rr.stdout.linesIterator.collect {
           case line if line.startsWith(prefix) => line.replace(prefix, "")
         }.toList
       }
@@ -129,7 +129,7 @@ class ReplicatorTests
       dbPrefix)
 
     val line = """([\w-]+) -> ([\w-]+) \(([\w-]+)\)""".r.unanchored
-    val replays = rr.stdout.lines.collect {
+    val replays = rr.stdout.linesIterator.collect {
       case line(backup, target, id) => (backup, target, id)
     }.toList
 
@@ -349,7 +349,7 @@ class ReplicatorTests
 
   it should "continuously update a database" in {
     // Create a database to backup
-    val dbName = testDbPrefix + "database_for_continous_replication"
+    val dbName = testDbPrefix + "database_for_continuous_replication"
     val backupDbName = s"continuous_$dbName"
 
     // Pre-test cleanup of previously created entities

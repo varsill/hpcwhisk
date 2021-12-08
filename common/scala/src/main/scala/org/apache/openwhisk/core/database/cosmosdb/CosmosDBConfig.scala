@@ -27,6 +27,7 @@ import com.typesafe.config.Config
 import com.typesafe.config.ConfigUtil.joinPath
 import org.apache.openwhisk.core.ConfigKeys
 import pureconfig._
+import pureconfig.generic.auto._
 
 import scala.collection.JavaConverters._
 import scala.concurrent.duration._
@@ -37,7 +38,10 @@ case class CosmosDBConfig(endpoint: String,
                           throughput: Int,
                           consistencyLevel: ConsistencyLevel,
                           connectionPolicy: ConnectionPolicy,
-                          timeToLive: Option[Duration]) {
+                          timeToLive: Option[Duration],
+                          clusterId: Option[String],
+                          softDeleteTTL: Option[FiniteDuration],
+                          recordUsageFrequency: Option[FiniteDuration]) {
 
   def createClient(): AsyncDocumentClient = {
     new AsyncDocumentClient.Builder()

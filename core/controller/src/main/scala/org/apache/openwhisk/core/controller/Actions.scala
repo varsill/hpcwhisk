@@ -19,21 +19,18 @@ package org.apache.openwhisk.core.controller
 
 import scala.concurrent.Future
 import scala.concurrent.duration._
-import scala.language.postfixOps
 import scala.util.{Failure, Success, Try}
 import org.apache.kafka.common.errors.RecordTooLargeException
 import akka.actor.ActorSystem
-import akka.http.scaladsl.model.HttpMethod
 import akka.http.scaladsl.model.StatusCodes._
 import akka.http.scaladsl.server.RequestContext
 import akka.http.scaladsl.server.RouteResult
 import akka.http.scaladsl.marshallers.sprayjson.SprayJsonSupport._
-import akka.http.scaladsl.marshallers.sprayjson.SprayJsonSupport.sprayJsonMarshaller
 import akka.http.scaladsl.unmarshalling._
 import spray.json._
 import spray.json.DefaultJsonProtocol._
 import org.apache.openwhisk.common.TransactionId
-import org.apache.openwhisk.core.WhiskConfig
+import org.apache.openwhisk.core.{FeatureFlags, WhiskConfig}
 import org.apache.openwhisk.core.controller.RestApiCommons.{ListLimit, ListSkip}
 import org.apache.openwhisk.core.controller.actions.PostActionActivation
 import org.apache.openwhisk.core.database.{ActivationStore, CacheChangeNotification, NoDocumentException}
@@ -46,6 +43,8 @@ import org.apache.openwhisk.http.Messages._
 import org.apache.openwhisk.core.entitlement.Resource
 import org.apache.openwhisk.core.entitlement.Collection
 import org.apache.openwhisk.core.loadBalancer.LoadBalancerException
+import pureconfig._
+import org.apache.openwhisk.core.ConfigKeys
 
 /**
  * A singleton object which defines the properties that must be present in a configuration
@@ -55,10 +54,36 @@ object WhiskActionsApi {
   def requiredProperties = Map(WhiskConfig.actionSequenceMaxLimit -> null)
 
   /**
-   * Max duration to wait for a blocking activation.
-   * This is the default timeout on a POST request.
+   * Amends annotations on an action create/update with system defined values.
+   * This method currently adds the following annotations:
+   * 1. [[Annotations.ProvideApiKeyAnnotationName]] with the value false iff the annotation is not already defined in the action annotations
+   * 2. An [[execAnnotation]] consistent with the action kind; this annotation is always added and overrides a pre-existing value
    */
-  protected[core] val maxWaitForBlockingActivation = 60 seconds
+  protected[core] def amendAnnotations(annotations: Parameters, exec: Exec, create: Boolean = true): Parameters = {
+    val newAnnotations = if (create && FeatureFlags.requireApiKeyAnnotation) {
+      // these annotations are only added on newly created actions
+      // since they can break existing actions created before the
+      // annotation was created
+      annotations
+        .get(Annotations.ProvideApiKeyAnnotationName)
+        .map(_ => annotations)
+        .getOrElse {
+          annotations ++ Parameters(Annotations.ProvideApiKeyAnnotationName, JsFalse)
+        }
+    } else annotations
+    newAnnotations ++ execAnnotation(exec)
+  }
+
+  /**
+   * Constructs an "exec" annotation. This is redundant with the exec kind
+   * information available in WhiskAction but necessary for some clients which
+   * fetch action lists but cannot determine action kinds without fetching them.
+   * An alternative is to include the exec in the action list "view" but this
+   * will require an API change. So using an annotation instead.
+   */
+  private def execAnnotation(exec: Exec): Parameters = {
+    Parameters(WhiskAction.execFieldName, exec.kind)
+  }
 }
 
 /** A trait implementing the actions API. */
@@ -78,6 +103,10 @@ trait WhiskActionsApi extends WhiskCollectionAPI with PostActionActivation with 
 
   /** Database service to get activations. */
   protected val activationStore: ActivationStore
+
+  /** Config flag for Execute Only for Actions in Shared Packages */
+  protected def executeOnly =
+    loadConfigOrThrow[Boolean](ConfigKeys.sharedPackageExecuteOnly)
 
   /** Entity normalizer to JSON object. */
   import RestApiCommons.emptyEntityToJsObject
@@ -141,14 +170,10 @@ trait WhiskActionsApi extends WhiskCollectionAPI with PostActionActivation with 
             onComplete(entitlementProvider.check(user, right, packageResource)) {
               case Success(_) =>
                 getEntity(WhiskPackage.get(entityStore, packageDocId), Some {
-                  if (right == Privilege.READ || right == Privilege.ACTIVATE) {
-                    // need to merge package with action, hence authorize subject for package
-                    // access (if binding, then subject must be authorized for both the binding
-                    // and the referenced package)
-                    //
-                    // NOTE: it is an error if either the package or the action does not exist,
-                    // the former manifests as unauthorized and the latter as not found
-                    mergeActionWithPackageAndDispatch(m, user, EntityName(innername)) _
+                  if (right == Privilege.READ || right == Privilege.ACTIVATE) { wp: WhiskPackage =>
+                    val actionResource = Resource(wp.fullPath, collection, Some(innername))
+                    dispatchOp(user, right, actionResource)
+
                   } else {
                     // these packaged action operations do not need merging with the package,
                     // but may not be permitted if this is a binding, or if the subject does
@@ -219,33 +244,34 @@ trait WhiskActionsApi extends WhiskCollectionAPI with PostActionActivation with 
     parameter(
       'blocking ? false,
       'result ? false,
-      'timeout.as[FiniteDuration] ? WhiskActionsApi.maxWaitForBlockingActivation) { (blocking, result, waitOverride) =>
-      entity(as[Option[JsObject]]) { payload =>
-        getEntity(WhiskActionMetaData.get(entityStore, entityName.toDocId), Some {
-          act: WhiskActionMetaData =>
-            // resolve the action --- special case for sequences that may contain components with '_' as default package
-            val action = act.resolve(user.namespace)
-            onComplete(entitleReferencedEntitiesMetaData(user, Privilege.ACTIVATE, Some(action.exec))) {
-              case Success(_) =>
-                val actionWithMergedParams = env.map(action.inherit(_)) getOrElse action
+      'timeout.as[FiniteDuration] ? controllerActivationConfig.maxWaitForBlockingActivation) {
+      (blocking, result, waitOverride) =>
+        entity(as[Option[JsObject]]) { payload =>
+          getEntity(WhiskActionMetaData.resolveActionAndMergeParameters(entityStore, entityName), Some {
+            act: WhiskActionMetaData =>
+              // resolve the action --- special case for sequences that may contain components with '_' as default package
+              val action = act.resolve(user.namespace)
+              onComplete(entitleReferencedEntitiesMetaData(user, Privilege.ACTIVATE, Some(action.exec))) {
+                case Success(_) =>
+                  val actionWithMergedParams = env.map(action.inherit(_)) getOrElse action
 
-                // incoming parameters may not override final parameters (i.e., parameters with already defined values)
-                // on an action once its parameters are resolved across package and binding
-                val allowInvoke = payload
-                  .map(_.fields.keySet.forall(key => !actionWithMergedParams.immutableParameters.contains(key)))
-                  .getOrElse(true)
+                  // incoming parameters may not override final parameters (i.e., parameters with already defined values)
+                  // on an action once its parameters are resolved across package and binding
+                  val allowInvoke = payload
+                    .map(_.fields.keySet.forall(key => !actionWithMergedParams.immutableParameters.contains(key)))
+                    .getOrElse(true)
 
-                if (allowInvoke) {
-                  doInvoke(user, actionWithMergedParams, payload, blocking, waitOverride, result)
-                } else {
-                  terminate(BadRequest, Messages.parametersNotAllowed)
-                }
+                  if (allowInvoke) {
+                    doInvoke(user, actionWithMergedParams, payload, blocking, waitOverride, result)
+                  } else {
+                    terminate(BadRequest, Messages.parametersNotAllowed)
+                  }
 
-              case Failure(f) =>
-                super.handleEntitlementFailure(f)
-            }
-        })
-      }
+                case Failure(f) =>
+                  super.handleEntitlementFailure(f)
+              }
+          })
+        }
     }
   }
 
@@ -284,7 +310,7 @@ trait WhiskActionsApi extends WhiskCollectionAPI with PostActionActivation with 
         }
       case Failure(t: RecordTooLargeException) =>
         logging.debug(this, s"[POST] action payload was too large")
-        terminate(RequestEntityTooLarge)
+        terminate(PayloadTooLarge)
       case Failure(RejectRequest(code, message)) =>
         logging.debug(this, s"[POST] action rejected with code $code: $message")
         terminate(code, message)
@@ -310,6 +336,50 @@ trait WhiskActionsApi extends WhiskCollectionAPI with PostActionActivation with 
     deleteEntity(WhiskAction, entityStore, entityName.toDocId, (a: WhiskAction) => Future.successful({}))
   }
 
+  /** Checks for package binding case. we don't want to allow get for a package binding in shared package */
+  private def fetchEntity(entityName: FullyQualifiedEntityName, env: Option[Parameters], code: Boolean)(
+    implicit transid: TransactionId) = {
+    val resolvedPkg: Future[Either[String, FullyQualifiedEntityName]] = if (entityName.path.defaultPackage) {
+      Future.successful(Right(entityName))
+    } else {
+      WhiskPackage.resolveBinding(entityStore, entityName.path.toDocId, mergeParameters = true).map { pkg =>
+        val originalPackageLocation = pkg.fullyQualifiedName(withVersion = false).namespace
+        if (executeOnly && originalPackageLocation != entityName.namespace) {
+          Left(forbiddenGetActionBinding(entityName.toDocId.asString))
+        } else {
+          Right(entityName)
+        }
+      }
+    }
+    onComplete(resolvedPkg) {
+      case Success(pkgFuture) =>
+        pkgFuture match {
+          case Left(f) => terminate(Forbidden, f)
+          case Right(_) =>
+            if (code) {
+              getEntity(WhiskAction.resolveActionAndMergeParameters(entityStore, entityName), Some {
+                action: WhiskAction =>
+                  val mergedAction = env map {
+                    action inherit _
+                  } getOrElse action
+                  complete(OK, mergedAction)
+              })
+            } else {
+              getEntity(WhiskActionMetaData.resolveActionAndMergeParameters(entityStore, entityName), Some {
+                action: WhiskActionMetaData =>
+                  val mergedAction = env map {
+                    action inherit _
+                  } getOrElse action
+                  complete(OK, mergedAction)
+              })
+            }
+        }
+      case Failure(t: Throwable) =>
+        logging.error(this, s"[GET] package ${entityName.path.toDocId} failed: ${t.getMessage}")
+        terminate(InternalServerError)
+    }
+  }
+
   /**
    * Gets action. The action name is prefixed with the namespace to create the primary index key.
    *
@@ -321,21 +391,12 @@ trait WhiskActionsApi extends WhiskCollectionAPI with PostActionActivation with 
   override def fetch(user: Identity, entityName: FullyQualifiedEntityName, env: Option[Parameters])(
     implicit transid: TransactionId) = {
     parameter('code ? true) { code =>
-      code match {
-        case true =>
-          getEntity(WhiskAction.get(entityStore, entityName.toDocId), Some { action: WhiskAction =>
-            val mergedAction = env map {
-              action inherit _
-            } getOrElse action
-            complete(OK, mergedAction)
-          })
-        case false =>
-          getEntity(WhiskActionMetaData.get(entityStore, entityName.toDocId), Some { action: WhiskActionMetaData =>
-            val mergedAction = env map {
-              action inherit _
-            } getOrElse action
-            complete(OK, mergedAction)
-          })
+      //check if execute only is enabled, and if there is a discrepancy between the current user's namespace
+      //and that of the entity we are trying to fetch
+      if (executeOnly && user.namespace.name != entityName.namespace) {
+        terminate(Forbidden, forbiddenGetAction(entityName.path.asString))
+      } else {
+        fetchEntity(entityName, env, code)
       }
     }
   }
@@ -377,13 +438,6 @@ trait WhiskActionsApi extends WhiskCollectionAPI with PostActionActivation with 
     resolvedComponents
   }
 
-  /** Replaces default namespaces in an action sequence with appropriate namespace. */
-  private def resolveDefaultNamespace(seq: SequenceExec, user: Identity): SequenceExec = {
-    // if components are part of the default namespace, they contain `_`; replace it!
-    val resolvedComponents = resolveDefaultNamespace(seq.components, user)
-    new SequenceExec(resolvedComponents)
-  }
-
   /**
    * Creates a WhiskAction instance from the PUT request.
    */
@@ -416,7 +470,7 @@ trait WhiskActionsApi extends WhiskCollectionAPI with PostActionActivation with 
       limits,
       content.version getOrElse SemVer(),
       content.publish getOrElse false,
-      (content.annotations getOrElse Parameters()) ++ execAnnotation(exec))
+      WhiskActionsApi.amendAnnotations(content.annotations getOrElse Parameters(), exec))
   }
 
   /** For a sequence action, gather referenced entities and authorize access. */
@@ -523,6 +577,13 @@ trait WhiskActionsApi extends WhiskCollectionAPI with PostActionActivation with 
 
     val exec = content.exec getOrElse action.exec
 
+    val newAnnotations = content.delAnnotations
+      .map { annotationArray =>
+        annotationArray.foldRight(action.annotations)((a: String, b: Parameters) => b - a)
+      }
+      .map(_ ++ content.annotations)
+      .getOrElse(action.annotations ++ content.annotations)
+
     WhiskAction(
       action.namespace,
       action.name,
@@ -531,7 +592,7 @@ trait WhiskActionsApi extends WhiskCollectionAPI with PostActionActivation with 
       limits,
       content.version getOrElse action.version.upPatch,
       content.publish getOrElse action.publish,
-      (content.annotations getOrElse action.annotations) ++ execAnnotation(exec))
+      WhiskActionsApi.amendAnnotations(newAnnotations, exec, create = false))
       .revision[WhiskAction](action.docinfo.rev)
   }
 
@@ -561,38 +622,6 @@ trait WhiskActionsApi extends WhiskCollectionAPI with PostActionActivation with 
       // list actions in resolved namespace
       list(user, pkgns)
     })
-  }
-
-  /**
-   * Constructs a WhiskPackage that is a merger of a package with its packing binding (if any).
-   * This resolves a reference versus an actual package and merge parameters as needed.
-   * Once the package is resolved, the operation is dispatched to the action in the package
-   * namespace.
-   */
-  private def mergeActionWithPackageAndDispatch(method: HttpMethod,
-                                                user: Identity,
-                                                action: EntityName,
-                                                ref: Option[WhiskPackage] = None)(wp: WhiskPackage)(
-    implicit transid: TransactionId): RequestContext => Future[RouteResult] = {
-    wp.binding map {
-      case b: Binding =>
-        val docid = b.fullyQualifiedName.toDocId
-        logging.debug(this, s"fetching package '$docid' for reference")
-        // already checked that subject is authorized for package and binding;
-        // this fetch is redundant but should hit the cache to ameliorate cost
-        getEntity(WhiskPackage.get(entityStore, docid), Some {
-          mergeActionWithPackageAndDispatch(method, user, action, Some { wp }) _
-        })
-    } getOrElse {
-      // a subject has implied rights to all resources in a package, so dispatch
-      // operation without further entitlement checks
-      val params = { ref map { _ inherit wp.parameters } getOrElse wp } parameters
-      val ns = wp.namespace.addPath(wp.name) // the package namespace
-      val resource = Resource(ns, collection, Some { action.asString }, Some { params })
-      val right = collection.determineRight(method, resource.entity)
-      logging.debug(this, s"merged package parameters and rebased action to '$ns")
-      dispatchOp(user, right, resource)
-    }
   }
 
   /**
@@ -685,28 +714,18 @@ trait WhiskActionsApi extends WhiskCollectionAPI with PostActionActivation with 
     }
   }
 
-  /**
-   * Constructs an "exec" annotation. This is redundant with the exec kind
-   * information available in WhiskAction but necessary for some clients which
-   * fetch action lists but cannot determine action kinds without fetching them.
-   * An alternative is to include the exec in the action list "view" but this
-   * will require an API change. So using an annotation instead.
-   */
-  private def execAnnotation(exec: Exec): Parameters = {
-    Parameters(WhiskAction.execFieldName, exec.kind)
-  }
-
   /** Max atomic action count allowed for sequences. */
   private lazy val actionSequenceLimit = whiskConfig.actionSequenceLimit.toInt
 
   implicit val stringToFiniteDuration: Unmarshaller[String, FiniteDuration] = {
     Unmarshaller.strict[String, FiniteDuration] { value =>
-      val max = WhiskActionsApi.maxWaitForBlockingActivation.toMillis
+      val max = controllerActivationConfig.maxWaitForBlockingActivation.toMillis
 
       Try { value.toInt } match {
         case Success(i) if i > 0 && i <= max => i.milliseconds
         case _ =>
-          throw new IllegalArgumentException(Messages.invalidTimeout(WhiskActionsApi.maxWaitForBlockingActivation))
+          throw new IllegalArgumentException(
+            Messages.invalidTimeout(controllerActivationConfig.maxWaitForBlockingActivation))
       }
     }
   }

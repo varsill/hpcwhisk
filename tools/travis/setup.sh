@@ -30,29 +30,20 @@ function retry() {
   fi
 }
 
-sudo gpasswd -a travis docker
-sudo -E bash -c 'echo '\''DOCKER_OPTS="-H tcp://0.0.0.0:4243 -H unix:///var/run/docker.sock --storage-driver=overlay --userns-remap=default"'\'' > /etc/default/docker'
-
-# Docker
-sudo apt-get -y update -qq
-sudo apt-get -o Dpkg::Options::="--force-confold" --force-yes -y install docker-engine=1.12.0-0~trusty
-sudo service docker restart
-echo "Docker Version:"
-docker version
-echo "Docker Info:"
-docker info
-
 # Python
-pip install --user couchdb
+python -m pip install --user couchdb
 
 # Ansible
-pip install --user ansible==2.5.2
+python -m pip install --user ansible==2.8.18
 
 # Azure CosmosDB
-pip install --user pydocumentdb
+python -m pip install --user pydocumentdb
 
 # Support the revises log upload script
-pip install --user humanize requests
+python -m pip install --user humanize requests
+
+# Scan code before compiling the code
+./scan.sh
 
 # Basic check that all code compiles and depdendencies are downloaded correctly.
 # Compiling the tests will compile all components as well.

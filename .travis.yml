@@ -15,13 +15,10 @@
 # limitations under the License.
 #
 
-sudo: required
-
-group: deprecated-2017Q3
-
-language: scala
-scala:
-   - 2.12.7
+os: linux
+dist: focal
+language: java
+jdk: openjdk11
 
 services:
   - docker
@@ -43,7 +40,7 @@ notifications:
   webhooks:
     urls:
       # travis2slack webhook to enable DMs on openwhisk-team.slack.com to PR authors with TravisCI results
-      secure: "tYJIDAKtHp+yLw53yB6+TQnNfyNwZDAZyG7QmHbNP5Mf1HR0GLhpe02AjV99NkjAgaGYxngUELMhNOyB8eiyMdxpemwny4oOeyOUQzVmiry/804JnjK2YvHyAGFVGuhV0LZVfCPsPh5x91yKcDPLSqRSTKhZOiJFmDpBy4qzxM4W7IXxAM+yHKrm8cznBRdR5rGxT5IjV58xMB1p69jJy1rxnjtEWmB2z7j/SiKa6IQlVYgr+BgaJxBhy9WYYczvceU+qyrTWpVYy5P3o5+b0MZ/UkyB5CZT9N5LzLGjLRDqNaNYCT3U8ow1H6w+zY7/9KrAf6szT6raN606vN7uv7TqGEugG949JQfRSQNe3Y7IvTAHatI9VAc3opWgy0jm7eBu9pzSECamGGSGGHl18m7oWZypiwB+ooKg7k545XQCoVwlRulBvwnVO8w2HOjkKSds/JnNhdXLtNKRaBaZxhBkk+5b43k59vaYsHDXaYFUob/nG/K3JoPRkcLtFe3JfNsCABJYC0VbRE3AizHr8CYMhBUrgElPFwPmIJwwLOORq6y3zIRxTOIz4b/x2q9Oa17vK0IwAjgHi8y9RXc6lG0mCyVFScdpxoGF3d9xF8Edwc8WN22pYaZ8r71UF4AWOVxJs1Cnp8gcAn14gONVVvkaVCUwNCCElbJkjdVhhnI="
+      secure: "qSkFNkMDYhp025vW+hBWO4wlMEeaz2S2c3tsZgIhcqji58AAxL2KKuNIWAuzftIxC5l5RwPt/OBXWFjgnAwCjj3hfczMfpuexGPruzmRe2GYbBwS0OhwDkWVosl9UqFELbZEdQ/tTJyW7p3Gd4FSjCJBCAdRL5yYcn3RiCj/UrJ6454IkKqeuTihWp2ZklqnZpMv9WzC4DK+cI/rJUP5megh/gilORfBD5/wnMMksC5NSlpc2WAtdeKusVZiZ6ieR6uLoR3rwzgUBC3PbyX8GO1OIh+LnvO7c0Hrhc2u685nxrCMseJIH9kZQboGA7RbiH64U5Zy7dK6fiFGfQJc3YyfsbKBKyd0QlvZp1vKw4iAvtsyentodjR1lN29fuTUW3hPMCo/YJSxZmHHMRSsoqs4zMp7lHo0aDfBOJRB+jjluA96Tn8SZjIATu76SwzJ0EolyVGw25HqKxSX0eM0ZLgrVrh89CwSlEYop07lQzaa1QTFu9DizONS8jlQYpXoAdgfeBXPDCyHVUzYjljzKyZG2Ph86eEo1mdHOlDyPI0hHuspBObP/mxSKXldxgBDRJ2jvF75t9DcxZdDzis5HBZeEktyIFaLS7spHlQLqGNEnpxNc+FxpT52Uw/sYJ6e1OG2Qx3Jhz4NNo4wJWUkdS1saaFCxIlyh7pqjpnsWqU="
 
 # specific cache configuration for gradle based builds
 # see: https://docs.travis-ci.com/user/languages/java/#caching
@@ -57,8 +54,11 @@ cache:
     - $HOME/.gradle/wrapper/
 
 before_install:
-  - pip install --upgrade pip setuptools six
-  - pip3 install --upgrade pip setuptools six
+  - sudo systemctl stop epmd.socket epmd.service
+  - ./tools/travis/docker.sh
+  - sudo apt-get install -y python3-pip
+  - pip install --user --upgrade pip setuptools six
+  - pip3 install --user --upgrade pip setuptools six
 
 install:
   - ./tools/travis/setup.sh
@@ -66,17 +66,24 @@ install:
 jobs:
   include:
     - script:
+        - TERM=dumb OW_SCALA_VERSION=2.13 ./gradlew :tests:compileTestScala
+      name: "Scala 2.13 compilation"
+    - script:
         - ./tools/travis/runUnitTests.sh
         - ./tools/travis/checkAndUploadLogs.sh unit db
       name: "Unit Tests"
     - script:
-       - ./tools/travis/runSystemTests.sh
-       - ./tools/travis/checkAndUploadLogs.sh system
+      - ./tools/travis/runSystemTests.sh
+      - ./tools/travis/checkAndUploadLogs.sh system
       name: "System Tests"
     - script:
       - ./tools/travis/runMultiRuntimeTests.sh
       - ./tools/travis/checkAndUploadLogs.sh multi-runtime
       name: "Multi-Runtime Tests"
+    - script:
+        - ./tools/travis/runStandaloneTests.sh
+        - ./tools/travis/checkAndUploadLogs.sh standalone
+      name: "Standalone Tests"
     - script:
         - ./tests/performance/preparation/deploy.sh
         - TERM=dumb ./tests/performance/wrk_tests/latency.sh "https://172.17.0.1:10001" "$(cat ansible/files/auth.guest)" ./tests/performance/preparation/actions/noop.js 2m
@@ -93,3 +100,7 @@ jobs:
         - OPENWHISK_HOST="172.17.0.1" USERS="1" REQUESTS_PER_SEC="1" ./gradlew gatlingRun-org.apache.openwhisk.ColdBlockingInvokeSimulation
         - ./tools/travis/checkAndUploadLogs.sh perf
       name: "Performance Tests"
+    - script:
+        - ./tools/travis/runSchedulerTests.sh
+        - ./tools/travis/checkAndUploadLogs.sh scheduler
+      name: "Scheduler Tests"

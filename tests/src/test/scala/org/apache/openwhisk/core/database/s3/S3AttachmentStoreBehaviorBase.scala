@@ -18,11 +18,10 @@
 package org.apache.openwhisk.core.database.s3
 
 import akka.actor.ActorSystem
-import akka.stream.ActorMaterializer
 import org.scalatest.FlatSpec
 import org.apache.openwhisk.common.Logging
 import org.apache.openwhisk.core.database.{AttachmentStore, DocumentSerializer}
-import org.apache.openwhisk.core.database.memory.MemoryArtifactStoreBehaviorBase
+import org.apache.openwhisk.core.database.memory.{MemoryArtifactStoreBehaviorBase, MemoryArtifactStoreProvider}
 import org.apache.openwhisk.core.database.test.AttachmentStoreBehaviors
 import org.apache.openwhisk.core.database.test.behavior.ArtifactStoreAttachmentBehaviors
 import org.apache.openwhisk.core.entity.WhiskEntity
@@ -37,14 +36,16 @@ trait S3AttachmentStoreBehaviorBase
     with AttachmentStoreBehaviors {
   override lazy val store = makeS3Store[WhiskEntity]
 
-  override implicit val materializer: ActorMaterializer = ActorMaterializer()
-
   override val prefix = s"attachmentTCK_${Random.alphanumeric.take(4).mkString}"
+
+  override protected def beforeAll(): Unit = {
+    MemoryArtifactStoreProvider.purgeAll()
+    super.beforeAll()
+  }
 
   override def getAttachmentStore[D <: DocumentSerializer: ClassTag](): AttachmentStore =
     makeS3Store[D]()
 
   def makeS3Store[D <: DocumentSerializer: ClassTag]()(implicit actorSystem: ActorSystem,
-                                                       logging: Logging,
-                                                       materializer: ActorMaterializer): AttachmentStore
+                                                       logging: Logging): AttachmentStore
 }

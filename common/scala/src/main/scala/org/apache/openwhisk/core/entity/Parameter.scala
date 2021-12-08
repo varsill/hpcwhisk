@@ -32,7 +32,7 @@ import org.apache.openwhisk.core.entity.size.SizeString
  * @param key the parameter name, assured to be non-null because it is a value
  * @param value the parameter value, assured to be non-null because it is a value
  */
-protected[core] class Parameters protected[entity] (private val params: Map[ParameterName, ParameterValue])
+protected[core] class Parameters protected[entity] (protected[entity] val params: Map[ParameterName, ParameterValue])
     extends AnyVal {
 
   /**
@@ -44,12 +44,6 @@ protected[core] class Parameters protected[entity] (private val params: Map[Para
     params
       .map { case (name, value) => name.size + value.size }
       .foldLeft(0 B)(_ + _)
-  }
-
-  protected[entity] def +(p: (ParameterName, ParameterValue)) = {
-    Option(p) map { p =>
-      new Parameters(params + (p._1 -> p._2))
-    } getOrElse this
   }
 
   protected[entity] def +(p: ParameterName, v: ParameterValue) = {
@@ -65,19 +59,36 @@ protected[core] class Parameters protected[entity] (private val params: Map[Para
   }
 
   /** Remove parameter by name. */
-  protected[core] def -(p: String) = {
+  protected[core] def -(p: String): Parameters = {
     // wrap with try since parameter name may throw an exception for illegal p
     Try(new Parameters(params - new ParameterName(p))) getOrElse this
   }
 
-  /** Gets list all defined parameters. */
+  /** Gets set of all defined parameters. */
   protected[core] def definedParameters: Set[String] = {
     params.keySet filter (params(_).isDefined) map (_.name)
   }
 
+  /** Gets set of all defined parameters. */
+  protected[core] def initParameters: Set[String] = {
+    params.keySet filter (params(_).init) map (_.name)
+  }
+
+  /**
+   * Gets map of all locked (encrypted) parameters, excluding parameters from given set.
+   */
+  protected[core] def lockedParameters(exclude: Set[String] = Set.empty): Map[String, String] = {
+    params.collect {
+      case p if p._2.encryption.isDefined && !exclude.contains(p._1.name) => (p._1.name -> p._2.encryption.get)
+    }
+  }
+
   protected[core] def toJsArray = {
     JsArray(params map { p =>
-      JsObject("key" -> p._1.name.toJson, "value" -> p._2.value.toJson)
+      val init = if (p._2.init) Some("init" -> JsTrue) else None
+      val encrypt = p._2.encryption.map(e => ("encryption" -> JsString(e)))
+
+      JsObject(Map("key" -> p._1.name.toJson, "value" -> p._2.value) ++ init ++ encrypt)
     } toSeq: _*)
   }
 
@@ -103,16 +114,55 @@ protected[core] class Parameters protected[entity] (private val params: Map[Para
       .fold[Try[JsValue]](Failure(new IllegalStateException(s"key '$p' does not exist")))(Success.apply)
       .flatMap(js => Try(js.convertTo[T]))
 
-  /** Retrieves parameter by name if it exist. Returns true if parameter exists and has truthy value. */
-  protected[core] def isTruthy(p: String): Boolean = {
+  /**
+   *  Retrieves parameter by name if it exist.
+   *  @param p the parameter to check for a truthy value
+   *  @param valueForNonExistent the value to return for a missing parameter (default false)
+   *  @return true if parameter exists and has truthy value, otherwise returns the specified value for non-existent keys
+   */
+  protected[core] def isTruthy(p: String, valueForNonExistent: Boolean = false): Boolean = {
     get(p) map {
       case JsBoolean(b) => b
       case JsNumber(n)  => n != 0
       case JsString(s)  => s.nonEmpty
       case JsNull       => false
       case _            => true
-    } getOrElse false
+    } getOrElse valueForNonExistent
   }
+
+  /**
+   * Encrypts any parameters that are not yet encoded.
+   *
+   * @param encoder the encoder to transform parameter values with
+   * @return parameters with all values encrypted
+   */
+  def lock(encoder: Option[Encrypter] = None): Parameters = {
+    encoder
+      .map { coder =>
+        new Parameters(params.map {
+          case (paramName, paramValue) if paramValue.encryption.isEmpty =>
+            paramName -> coder.encrypt(paramValue)
+          case p => p
+        })
+      }
+      .getOrElse(this)
+  }
+
+  /**
+   * Decodes parameters. If the encryption scheme for a parameter is not recognized, it is not modified.
+   *
+   * @param decoder the decoder to use to transform locked values
+   * @return parameters will all values decoded (where scheme is known)
+   */
+  def unlock(decoder: ParameterEncryption): Parameters = {
+    new Parameters(params.map {
+      case p @ (paramName, paramValue) =>
+        paramValue.encryption
+          .map(paramName -> decoder.encryptor(_).decrypt(paramValue))
+          .getOrElse(p)
+    })
+  }
+
 }
 
 /**
@@ -139,13 +189,16 @@ protected[entity] class ParameterName protected[entity] (val name: String) exten
  * be undefined, such as when an action is created but the parameter value is not bound yet.
  * In general, this is an opaque value.
  *
- * It is a value type (hence == is .equals, immutable and cannot be assigned null).
  * The constructor is private so that argument requirements are checked and normalized
  * before creating a new instance.
  *
- * @param value the value of the parameter, may be null
+ * @param v the value of the parameter, may be null
+ * @param init if true, this parameter value is only offered to the action during initialization
+ * @param encryption the name of the encryption algorithm used to store the parameter or none (plain text)
  */
-protected[entity] class ParameterValue protected[entity] (private val v: JsValue) extends AnyVal {
+protected[entity] case class ParameterValue protected[entity] (private val v: JsValue,
+                                                               val init: Boolean,
+                                                               val encryption: Option[String] = None) {
 
   /** @return JsValue if defined else JsNull. */
   protected[entity] def value = Option(v) getOrElse JsNull
@@ -171,16 +224,33 @@ protected[core] object Parameters extends ArgNormalizer[Parameters] {
    * Creates a parameter tuple from a pair of strings.
    * A convenience method for tests.
    *
-   * @param p the parameter name
-   * @param v the parameter value
+   * @param p    the parameter name
+   * @param v    the parameter value
+   * @param init the parameter is for initialization
    * @return (ParameterName, ParameterValue)
    * @throws IllegalArgumentException if key is not defined
    */
   @throws[IllegalArgumentException]
-  protected[core] def apply(p: String, v: String): Parameters = {
+  protected[core] def apply(p: String, v: String, init: Boolean = false): Parameters = {
     require(p != null && p.trim.nonEmpty, "key undefined")
     Parameters() + (new ParameterName(ArgNormalizer.trim(p)),
-    new ParameterValue(Option(v) map { _.trim.toJson } getOrElse JsNull))
+    ParameterValue(Option(v).map(_.trim.toJson).getOrElse(JsNull), init, None))
+  }
+
+  /**
+   * Creates a parameter tuple from a parameter name and JsValue.
+   *
+   * @param p    the parameter name
+   * @param v    the parameter value
+   * @param init the parameter is for initialization
+   * @return (ParameterName, ParameterValue)
+   * @throws IllegalArgumentException if key is not defined
+   */
+  @throws[IllegalArgumentException]
+  protected[core] def apply(p: String, v: JsValue, init: Boolean): Parameters = {
+    require(p != null && p.trim.nonEmpty, "key undefined")
+    Parameters() + (new ParameterName(ArgNormalizer.trim(p)),
+    ParameterValue(Option(v).getOrElse(JsNull), init, None))
   }
 
   /**
@@ -195,7 +265,7 @@ protected[core] object Parameters extends ArgNormalizer[Parameters] {
   protected[core] def apply(p: String, v: JsValue): Parameters = {
     require(p != null && p.trim.nonEmpty, "key undefined")
     Parameters() + (new ParameterName(ArgNormalizer.trim(p)),
-    new ParameterValue(Option(v) getOrElse JsNull))
+    ParameterValue(Option(v).getOrElse(JsNull), false, None))
   }
 
   override protected[core] implicit val serdes = new RootJsonFormat[Parameters] {
@@ -208,13 +278,12 @@ protected[core] object Parameters extends ArgNormalizer[Parameters] {
      * @param parameters the JSON representation of an parameter array
      * @return Parameters instance if parameters conforms to schema
      */
-    def read(value: JsValue) =
-      Try {
-        val JsArray(params) = value
-        params
-      } flatMap {
-        read(_)
-      } getOrElse deserializationError("parameters malformed!")
+    def read(value: JsValue): Parameters = {
+      value match {
+        case JsArray(params) => read(params).getOrElse(deserializationError("parameters malformed!"))
+        case _               => deserializationError("parameters malformed!")
+      }
+    }
 
     /**
      * Gets parameters as a Parameters instances.
@@ -224,14 +293,33 @@ protected[core] object Parameters extends ArgNormalizer[Parameters] {
      * @return Parameters instance if parameters conforms to schema
      */
     def read(params: Vector[JsValue]) = Try {
-      new Parameters(params map {
-        _.asJsObject.getFields("key", "value") match {
-          case Seq(JsString(k), v: JsValue) =>
-            val key = new ParameterName(k)
-            val value = new ParameterValue(v)
-            (key, value)
-        }
-      } toMap)
+      new Parameters(params.map {
+        case o @ JsObject(fields) =>
+          o.getFields("key", "value", "init", "encryption") match {
+            case Seq(JsString(k), v: JsValue) if fields.contains("value") =>
+              val key = new ParameterName(k)
+              val value = ParameterValue(v, false)
+              (key, value)
+            case Seq(JsString(k), v: JsValue, JsBoolean(i)) =>
+              val key = new ParameterName(k)
+              val value = ParameterValue(v, i)
+              (key, value)
+            case Seq(JsString(k), v: JsValue, JsBoolean(i), JsString(e)) =>
+              val key = new ParameterName(k)
+              val value = ParameterValue(v, i, Some(e))
+              (key, value)
+            case Seq(JsString(k), v: JsValue, JsBoolean(i), JsNull) =>
+              val key = new ParameterName(k)
+              val value = ParameterValue(v, i, None)
+              (key, value)
+            case Seq(JsString(k), v: JsValue, JsString(e))
+                if fields.contains("value") && fields.contains("encryption") =>
+              val key = new ParameterName(k)
+              val value = ParameterValue(v, false, Some(e))
+              (key, value)
+          }
+        case _ => deserializationError("invalid parameter")
+      }.toMap)
     }
   }
 }

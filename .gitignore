@@ -47,9 +47,6 @@ build/
 # NodeJS
 node_modules
 
-# Vagrant
-.vagrant*
-
 # IntelliJ
 .idea
 *.class
@@ -72,6 +69,8 @@ ansible/roles/invoker/files/*
 
 # .zip files must be explicited whitelisted
 *.zip
+tests/dat/actions/zippedaction/node_modules
+tests/dat/actions/sleep.jar
 !tests/dat/actions/blackbox.zip
 !tests/dat/actions/helloSwift.zip
 !tests/dat/actions/python.zip
@@ -80,9 +79,29 @@ ansible/roles/invoker/files/*
 !tests/dat/actions/python_virtualenv_dir.zip
 !tests/dat/actions/python_virtualenv_name.zip
 !tests/dat/actions/zippedaction.zip
-
+!performance-tests/results.zip
+tests/performance/gatling_tests/.built
+tests/performance/gatling_tests/src/gatling/resources/data/javaAction.jar
+tests/dat/actions/unicode.tests/java-8.bin
+tests/dat/actions/.built
+tests/dat/actions/python_virtualenv/virtualenv
 # dev
 intellij-run-config.groovy
 
 # VSCode
 .vscode/
+
+# local invoker deployment
+local-invoker-deployment/config
+local-invoker-deployment/invoker
+
+# route management
+core/routemgmt/createApi/apigw-utils.js
+core/routemgmt/createApi/package-lock.json
+core/routemgmt/createApi/utils.js
+core/routemgmt/deleteApi/apigw-utils.js
+core/routemgmt/deleteApi/package-lock.json
+core/routemgmt/deleteApi/utils.js
+core/routemgmt/getApi/apigw-utils.js
+core/routemgmt/getApi/package-lock.json
+core/routemgmt/getApi/utils.js

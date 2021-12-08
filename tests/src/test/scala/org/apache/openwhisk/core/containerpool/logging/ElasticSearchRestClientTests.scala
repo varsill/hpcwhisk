@@ -18,23 +18,18 @@
 package org.apache.openwhisk.core.containerpool.logging
 
 import spray.json._
-
 import org.junit.runner.RunWith
-import org.scalatest.{FlatSpecLike, Matchers}
+import org.scalatest.{BeforeAndAfterAll, FlatSpecLike, Matchers}
 import org.scalatest.concurrent.ScalaFutures
 import org.scalatest.junit.JUnitRunner
-
 import akka.NotUsed
 import akka.actor.ActorSystem
 import akka.http.scaladsl.model._
 import akka.http.scaladsl.model.headers.Accept
 import akka.stream.scaladsl.Flow
-import akka.stream.ActorMaterializer
 import akka.testkit.TestKit
 import akka.http.scaladsl.model.HttpMethods.POST
-
 import common.StreamLogging
-
 import org.apache.openwhisk.core.containerpool.logging.ElasticSearchJsonProtocol._
 
 import scala.concurrent.duration._
@@ -46,11 +41,11 @@ class ElasticSearchRestClientTests
     extends TestKit(ActorSystem("ElasticSearchRestClient"))
     with FlatSpecLike
     with Matchers
+    with BeforeAndAfterAll
     with ScalaFutures
     with StreamLogging {
 
   implicit val ec: ExecutionContext = system.dispatcher
-  implicit val materializer: ActorMaterializer = ActorMaterializer()
 
   private val defaultResponseSource =
     """{"stream":"stdout","activationId":"197d60b33137424ebd60b33137d24ea3","action":"guest/someAction","@version":"1","@timestamp":"2018-03-27T15:48:09.112Z","type":"user_logs","tenant":"19bc46b1-71f6-4ed5-8c54-816aa4f8c502","message":"namespace     : user@email.com\n","time_date":"2018-03-27T15:48:08.716152793Z"}"""
@@ -61,6 +56,11 @@ class ElasticSearchRestClientTests
     POST,
     headers = List(Accept(MediaTypes.`application/json`)),
     entity = HttpEntity(ContentTypes.`application/json`, EsQuery(EsQueryAll()).toJson.toString))
+
+  override def afterAll(): Unit = {
+    TestKit.shutdownActorSystem(system)
+    super.afterAll()
+  }
 
   private def testFlow(httpResponse: HttpResponse = HttpResponse(), httpRequest: HttpRequest = HttpRequest())
     : Flow[(HttpRequest, Promise[HttpResponse]), (Try[HttpResponse], Promise[HttpResponse]), NotUsed] =

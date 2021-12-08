@@ -20,19 +20,19 @@ package org.apache.openwhisk.core.database
 import java.util.UUID
 
 import akka.actor.ActorSystem
-import akka.stream.ActorMaterializer
 import akka.stream.scaladsl.{Sink, Source}
-import org.rogach.scallop.{ScallopConfBase, Subcommand}
-import spray.json.{JsBoolean, JsObject, JsString, JsValue, RootJsonFormat}
 import org.apache.openwhisk.common.{Logging, TransactionId}
 import org.apache.openwhisk.core.cli.{CommandError, CommandMessages, IllegalState, WhiskCommand}
 import org.apache.openwhisk.core.database.UserCommand.ExtendedAuth
-import org.apache.openwhisk.core.entity.types._
 import org.apache.openwhisk.core.entity._
+import org.apache.openwhisk.core.entity.types._
 import org.apache.openwhisk.http.Messages
 import org.apache.openwhisk.spi.SpiLoader
+import org.rogach.scallop.{ScallopConfBase, Subcommand}
+import spray.json.{JsBoolean, JsObject, JsString, JsValue, RootJsonFormat}
 
 import scala.concurrent.{ExecutionContext, Future}
+import scala.language.reflectiveCalls
 import scala.reflect.classTag
 import scala.util.{Properties, Try}
 
@@ -58,7 +58,7 @@ class UserCommand extends Subcommand("user") with WhiskCommand {
       if (s.length < 5) {
         Left(CommandMessages.shortName)
       } else {
-        Right(Unit)
+        Right(())
       }
     }
 
@@ -70,7 +70,7 @@ class UserCommand extends Subcommand("user") with WhiskCommand {
           } else if (!isUUID(uuid)) {
             Left(CommandMessages.invalidUUID)
           } else {
-            Right(Unit)
+            Right(())
           }
         case _ => Left(s"failed to determine authorization id and key: $a")
       }
@@ -143,7 +143,6 @@ class UserCommand extends Subcommand("user") with WhiskCommand {
 
   def exec(cmd: ScallopConfBase)(implicit system: ActorSystem,
                                  logging: Logging,
-                                 materializer: ActorMaterializer,
                                  transid: TransactionId): Future[Either[CommandError, String]] = {
     implicit val executionContext = system.dispatcher
     val authStore = UserCommand.createDataStore()
@@ -282,7 +281,7 @@ class UserCommand extends Subcommand("user") with WhiskCommand {
 
   def changeUserState(authStore: AuthStore, subjects: List[String], blocked: Boolean)(
     implicit transid: TransactionId,
-    materializer: ActorMaterializer,
+    system: ActorSystem,
     ec: ExecutionContext): Future[Either[CommandError, String]] = {
     Source(subjects)
       .mapAsync(1)(changeUserState(authStore, _, blocked))
@@ -319,18 +318,10 @@ class UserCommand extends Subcommand("user") with WhiskCommand {
 }
 
 object UserCommand {
-  def createDataStore()(implicit system: ActorSystem,
-                        logging: Logging,
-                        materializer: ActorMaterializer): ArtifactStore[WhiskAuth] =
+  def createDataStore()(implicit system: ActorSystem, logging: Logging): ArtifactStore[WhiskAuth] =
     SpiLoader
       .get[ArtifactStoreProvider]
-      .makeStore[WhiskAuth]()(
-        classTag[WhiskAuth],
-        ExtendedAuthFormat,
-        WhiskDocumentReader,
-        system,
-        logging,
-        materializer)
+      .makeStore[WhiskAuth]()(classTag[WhiskAuth], ExtendedAuthFormat, WhiskDocumentReader, system, logging)
 
   class ExtendedAuth(subject: Subject, namespaces: Set[WhiskNamespace], blocked: Option[Boolean])
       extends WhiskAuth(subject, namespaces) {

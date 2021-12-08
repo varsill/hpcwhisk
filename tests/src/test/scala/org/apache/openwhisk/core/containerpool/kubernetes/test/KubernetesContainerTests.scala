@@ -21,7 +21,6 @@ import java.io.IOException
 import java.time.{Instant, ZoneId}
 
 import akka.NotUsed
-import akka.stream.ActorMaterializer
 import akka.stream.scaladsl.{Flow, Sink, Source}
 import akka.util.ByteString
 import common.TimingHelpers
@@ -50,8 +49,10 @@ import org.apache.openwhisk.core.entity.ActivationResponse.Timeout
 import org.apache.openwhisk.core.entity.size._
 import org.apache.openwhisk.http.Messages
 import org.apache.openwhisk.core.containerpool.docker.test.DockerContainerTests._
+import org.scalatest.concurrent.ScalaFutures
 
-import scala.collection.{immutable, mutable}
+import scala.collection.immutable.Queue
+import scala.collection.mutable
 
 /**
  * Unit tests for ContainerPool schedule
@@ -64,7 +65,8 @@ class KubernetesContainerTests
     with StreamLogging
     with BeforeAndAfterEach
     with WskActorSystem
-    with TimingHelpers {
+    with TimingHelpers
+    with ScalaFutures {
 
   import KubernetesClientTests.TestKubernetesClient
   import KubernetesContainerTests._
@@ -72,8 +74,6 @@ class KubernetesContainerTests
   override def beforeEach() = {
     stream.reset()
   }
-
-  implicit val materializer: ActorMaterializer = ActorMaterializer()
 
   def instantDT(instant: Instant): Instant = Instant.from(instant.atZone(ZoneId.of("GMT+0")))
 
@@ -108,7 +108,8 @@ class KubernetesContainerTests
         body: JsObject,
         timeout: FiniteDuration,
         concurrent: Int,
-        retry: Boolean = false)(implicit transid: TransactionId): Future[RunResult] = {
+        retry: Boolean = false,
+        reschedule: Boolean = false)(implicit transid: TransactionId): Future[RunResult] = {
         ccRes
       }
       override protected val waitForLogs = awaitLogs
@@ -173,7 +174,6 @@ class KubernetesContainerTests
         memory: ByteSize = 256.MB,
         env: Map[String, String] = Map.empty,
         labels: Map[String, String] = Map.empty)(implicit transid: TransactionId): Future[KubernetesContainer] = {
-        runs += ((name, image, env, labels))
         Future.failed(ProcessUnsuccessfulException(ExitStatus(1), "", ""))
       }
     }
@@ -182,8 +182,8 @@ class KubernetesContainerTests
       KubernetesContainer.create(transid = transid, name = "name", image = "image", userProvidedImage = true)
     a[WhiskContainerStartupError] should be thrownBy await(container)
 
-    kubernetes.runs should have size 1
-    kubernetes.rms should have size 0
+    kubernetes.runs should have size 0
+    kubernetes.rms should have size 1
   }
 
   /*
@@ -265,7 +265,7 @@ class KubernetesContainerTests
     }
 
     val runResult = container.run(JsObject.empty, JsObject.empty, 1.second, 1)
-    await(runResult) shouldBe (interval, ActivationResponse.success(Some(result)))
+    await(runResult) shouldBe (interval, ActivationResponse.success(Some(result), Some(2)))
 
     // assert the starting log is there
     val start = LogMarker.parse(logLines.head)
@@ -435,7 +435,7 @@ class KubernetesContainerTests
       override def logs(container: KubernetesContainer, sinceTime: Option[Instant], waitForSentinel: Boolean)(
         implicit transid: TransactionId): Source[TypedLogLine, Any] = {
         logCalls += ((container.id, sinceTime))
-        logSource(Seq(expectedLogEntry, expectedLogEntry), appendSentinel = false)
+        logSource(Queue(expectedLogEntry, expectedLogEntry), appendSentinel = false)
       }
     }
 
@@ -482,6 +482,45 @@ class KubernetesContainerTests
     processedLogsFalse(0) shouldBe expectedLogEntry.rawString
   }
 
+  it should "delete a pod that failed to start due to KubernetesPodApiException" in {
+    implicit val kubernetes = new TestKubernetesClient {
+      override def run(
+        name: String,
+        image: String,
+        memory: ByteSize = 256.MB,
+        env: Map[String, String] = Map.empty,
+        labels: Map[String, String] = Map.empty)(implicit transid: TransactionId): Future[KubernetesContainer] = {
+        Future.failed(KubernetesPodApiException(new Exception("faking fabric8 failure...")))
+      }
+    }
+
+    val container =
+      KubernetesContainer.create(transid = transid, name = "name", image = "image", userProvidedImage = true)
+    container.failed.futureValue shouldBe WhiskContainerStartupError(Messages.resourceProvisionError)
+
+    kubernetes.runs should have size 0
+    kubernetes.rms should have size 1
+  }
+
+  it should "delete a pod that failed to start due to some other Exception" in {
+    implicit val kubernetes = new TestKubernetesClient {
+      override def run(
+        name: String,
+        image: String,
+        memory: ByteSize = 256.MB,
+        env: Map[String, String] = Map.empty,
+        labels: Map[String, String] = Map.empty)(implicit transid: TransactionId): Future[KubernetesContainer] = {
+        Future.failed(new Exception("faking fabric8 failure..."))
+      }
+    }
+
+    val container =
+      KubernetesContainer.create(transid = transid, name = "name", image = "image", userProvidedImage = true)
+    container.failed.futureValue shouldBe a[WhiskContainerStartupError]
+
+    kubernetes.runs should have size 0
+    kubernetes.rms should have size 1
+  }
   def currentTsp: Instant = Instant.now
 
 }
@@ -489,15 +528,15 @@ class KubernetesContainerTests
 object KubernetesContainerTests {
 
   def logSource(logLine: TypedLogLine, appendSentinel: Boolean): Source[TypedLogLine, Any] =
-    logSource(Seq(logLine), appendSentinel)
+    logSource(Queue(logLine), appendSentinel)
 
-  def logSource(logs: Seq[TypedLogLine], appendSentinel: Boolean): Source[TypedLogLine, Any] =
-    Source(toLogs(logs, appendSentinel).to[immutable.Seq])
+  def logSource(logs: Queue[TypedLogLine], appendSentinel: Boolean): Source[TypedLogLine, Any] =
+    Source(toLogs(logs, appendSentinel))
 
-  def toLogs(logLine: TypedLogLine, appendSentinel: Boolean): Seq[TypedLogLine] =
-    toLogs(Seq(logLine), appendSentinel)
+  def toLogs(logLine: TypedLogLine, appendSentinel: Boolean): Queue[TypedLogLine] =
+    toLogs(Queue(logLine), appendSentinel)
 
-  def toLogs(log: Seq[TypedLogLine], appendSentinel: Boolean): Seq[TypedLogLine] =
+  def toLogs(log: Queue[TypedLogLine], appendSentinel: Boolean): Queue[TypedLogLine] =
     if (appendSentinel) {
       val lastTime = log.lastOption.map { case TypedLogLine(time, _, _) => time }.getOrElse(Instant.EPOCH)
       log :+

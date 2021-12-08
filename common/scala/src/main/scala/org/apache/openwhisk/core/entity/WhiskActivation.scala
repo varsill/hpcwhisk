@@ -24,9 +24,7 @@ import scala.util.Try
 import spray.json._
 import spray.json.DefaultJsonProtocol._
 import org.apache.openwhisk.common.TransactionId
-import org.apache.openwhisk.core.ConfigKeys
 import org.apache.openwhisk.core.database.{ArtifactStore, CacheChangeNotification, DocumentFactory, StaleParameter}
-import pureconfig._
 
 /**
  * A WhiskActivation provides an abstraction of the meta-data
@@ -137,6 +135,7 @@ object WhiskActivation
 
   /** Some field names for annotations */
   val pathAnnotation = "path"
+  val bindingAnnotation = "binding"
   val kindAnnotation = "kind"
   val limitsAnnotation = "limits"
   val topmostAnnotation = "topmost"
@@ -146,13 +145,17 @@ object WhiskActivation
   val conductorAnnotation = "conductor"
   val timeoutAnnotation = "timeout"
 
+  val memory = "memory"
+  val duration = "duration"
+  val statusCode = "statusCode"
+
   /** Some field names for compositions */
   val actionField = "action"
   val paramsField = "params"
   val stateField = "state"
   val valueField = "value"
 
-  protected[entity] implicit val instantSerdes = new RootJsonFormat[Instant] {
+  protected[entity] implicit val instantSerdes: RootJsonFormat[Instant] = new RootJsonFormat[Instant] {
     def write(t: Instant) = t.toEpochMilli.toJson
 
     def read(value: JsValue) =
@@ -167,18 +170,14 @@ object WhiskActivation
 
   override val collectionName = "activations"
 
-  private val dbConfig = loadConfigOrThrow[DBConfig](ConfigKeys.db)
-  private val mainDdoc = dbConfig.activationsDdoc
-  private val filtersDdoc = dbConfig.activationsFilterDdoc
-
   /** The main view for activations, keyed by namespace, sorted by date. */
-  override lazy val view = WhiskEntityQueries.view(mainDdoc, collectionName)
+  override lazy val view = WhiskQueries.view(WhiskQueries.dbConfig.activationsDdoc, collectionName)
 
   /**
    * A view for activations in a namespace additionally keyed by action name
    * (and package name if present) sorted by date.
    */
-  lazy val filtersView = WhiskEntityQueries.view(filtersDdoc, collectionName)
+  lazy val filtersView = WhiskQueries.view(WhiskQueries.dbConfig.activationsFilterDdoc, collectionName)
 
   override implicit val serdes = jsonFormat13(WhiskActivation.apply)
 
@@ -203,7 +202,7 @@ object WhiskActivation
                                   upto: Option[Instant] = None,
                                   stale: StaleParameter = StaleParameter.No)(
     implicit transid: TransactionId): Future[Either[List[JsObject], List[WhiskActivation]]] = {
-    import WhiskEntityQueries.TOP
+    import WhiskQueries.TOP
     val convert = if (includeDocs) Some((o: JsObject) => Try { serdes.read(o) }) else None
     val startKey = List(namespace.addPath(path).asString, since map { _.toEpochMilli } getOrElse 0)
     val endKey = List(namespace.addPath(path).asString, upto map { _.toEpochMilli } getOrElse TOP, TOP)

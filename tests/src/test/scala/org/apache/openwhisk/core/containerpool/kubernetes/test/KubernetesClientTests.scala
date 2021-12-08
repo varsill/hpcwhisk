@@ -20,8 +20,6 @@ package org.apache.openwhisk.core.containerpool.kubernetes.test
 import java.time.Instant
 
 import akka.actor.ActorSystem
-import akka.http.scaladsl.model.HttpResponse
-import akka.stream.ActorMaterializer
 import akka.stream.scaladsl.{Concat, Sink, Source}
 
 import scala.concurrent.Await
@@ -37,7 +35,6 @@ import org.scalatest.Matchers
 import org.scalatest.time.{Seconds, Span}
 import common.{StreamLogging, WskActorSystem}
 import okio.Buffer
-import spray.json.{JsObject, JsValue}
 import org.apache.openwhisk.common.TransactionId
 import org.apache.openwhisk.core.containerpool.{ContainerAddress, ContainerId}
 import org.apache.openwhisk.core.containerpool.kubernetes._
@@ -46,7 +43,7 @@ import org.apache.openwhisk.core.entity.size._
 import org.apache.openwhisk.core.containerpool.Container.ACTIVATION_LOG_SENTINEL
 
 import scala.collection.mutable
-import scala.collection.immutable
+import scala.collection.immutable.Queue
 
 @RunWith(classOf[JUnitRunner])
 class KubernetesClientTests
@@ -58,8 +55,6 @@ class KubernetesClientTests
     with WskActorSystem {
 
   import KubernetesClientTests._
-
-  implicit val materializer: ActorMaterializer = ActorMaterializer()
 
   val commandTimeout = 500.milliseconds
   def await[A](f: Future[A], timeout: FiniteDuration = commandTimeout) = Await.result(f, timeout)
@@ -104,14 +99,12 @@ class KubernetesClientTests
   def firstSource(lastTimestamp: Option[Instant] = None): Source[TypedLogLine, Any] =
     Source(
       KubernetesRestLogSourceStage
-        .readLines(new Buffer().writeUtf8(firstLog), lastTimestamp, List.empty)
-        .to[immutable.Seq])
+        .readLines(new Buffer().writeUtf8(firstLog), lastTimestamp, Queue.empty))
 
   def secondSource(lastTimestamp: Option[Instant] = None): Source[TypedLogLine, Any] =
     Source(
       KubernetesRestLogSourceStage
-        .readLines(new Buffer().writeUtf8(secondLog), lastTimestamp, List.empty)
-        .to[immutable.Seq])
+        .readLines(new Buffer().writeUtf8(secondLog), lastTimestamp, Queue.empty))
 
   it should "forward suspend commands to the client" in {
     implicit val kubernetes = new TestKubernetesClient
@@ -212,9 +205,15 @@ object KubernetesClientTests {
       Future.successful(())
     }
 
-    def rm(key: String, value: String, ensureUnpause: Boolean = false)(
+    override def rm(podName: String)(implicit transid: TransactionId): Future[Unit] = {
+      rms += ContainerId(podName)
+      Future.successful(())
+    }
+    def rm(labels: Map[String, String], ensureUnpause: Boolean = false)(
       implicit transid: TransactionId): Future[Unit] = {
-      rmByLabels += ((key, value))
+      labels.foreach { label =>
+        rmByLabels += ((label._1, label._2))
+      }
       Future.successful(())
     }
 
@@ -233,29 +232,9 @@ object KubernetesClientTests {
       logCalls += ((container.id, sinceTime))
       Source(List.empty[TypedLogLine])
     }
-  }
 
-  class TestKubernetesClientWithInvokerAgent(implicit as: ActorSystem)
-      extends TestKubernetesClient
-      with KubernetesApiWithInvokerAgent {
-    var agentCommands = mutable.Buffer.empty[(ContainerId, String, Option[Map[String, JsValue]])]
-    var forwardLogs = mutable.Buffer.empty[(ContainerId, Long)]
-
-    def agentCommand(command: String,
-                     container: KubernetesContainer,
-                     payload: Option[Map[String, JsValue]] = None): Future[HttpResponse] = {
-      agentCommands += ((container.id, command, payload))
-      Future.successful(HttpResponse())
-    }
-
-    def forwardLogs(container: KubernetesContainer,
-                    lastOffset: Long,
-                    sizeLimit: ByteSize,
-                    sentinelledLogs: Boolean,
-                    additionalMetadata: Map[String, JsValue],
-                    augmentedActivation: JsObject)(implicit transid: TransactionId): Future[Long] = {
-      forwardLogs += ((container.id, lastOffset))
-      Future.successful(lastOffset + sizeLimit.toBytes) // for testing, pretend we read size limit bytes
+    override def addLabel(container: KubernetesContainer, labels: Map[String, String]): Future[Unit] = {
+      Future.successful({})
     }
   }
 }

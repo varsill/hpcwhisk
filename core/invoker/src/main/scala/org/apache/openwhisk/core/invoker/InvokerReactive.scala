@@ -20,44 +20,41 @@ package org.apache.openwhisk.core.invoker
 import java.nio.charset.StandardCharsets
 import java.time.Instant
 
-import akka.actor.{ActorRefFactory, ActorSystem, Props}
+import akka.Done
+import akka.actor.{ActorRefFactory, ActorSystem, CoordinatedShutdown, Props}
 import akka.event.Logging.InfoLevel
-import akka.stream.ActorMaterializer
-import org.apache.kafka.common.errors.RecordTooLargeException
-import pureconfig._
-import spray.json._
-import org.apache.openwhisk.common.tracing.WhiskTracerProvider
+import akka.http.scaladsl.server.Directives.complete
+import akka.http.scaladsl.server.Route
 import org.apache.openwhisk.common._
+import org.apache.openwhisk.common.tracing.WhiskTracerProvider
+import org.apache.openwhisk.core.ack.{MessagingActiveAck, UserEventSender}
 import org.apache.openwhisk.core.connector._
 import org.apache.openwhisk.core.containerpool._
 import org.apache.openwhisk.core.containerpool.logging.LogStoreProvider
-import org.apache.openwhisk.core.database._
+import org.apache.openwhisk.core.database.{UserContext, _}
 import org.apache.openwhisk.core.entity._
 import org.apache.openwhisk.core.entity.size._
 import org.apache.openwhisk.core.{ConfigKeys, WhiskConfig}
 import org.apache.openwhisk.http.Messages
 import org.apache.openwhisk.spi.SpiLoader
-import org.apache.openwhisk.core.database.UserContext
+import pureconfig._
+import pureconfig.generic.auto._
+import spray.json._
 
 import scala.concurrent.duration._
 import scala.concurrent.{ExecutionContext, Future}
 import scala.util.{Failure, Success}
 
-object InvokerReactive {
+object InvokerReactive extends InvokerProvider {
 
-  /**
-   * An method for sending Active Acknowledgements (aka "active ack") messages to the load balancer. These messages
-   * are either completion messages for an activation to indicate a resource slot is free, or result-forwarding
-   * messages for continuations (e.g., sequences and conductor actions).
-   *
-   * @param TransactionId the transaction id for the activation
-   * @param WhiskActivaiton is the activation result
-   * @param Boolean is true iff the activation was a blocking request
-   * @param ControllerInstanceId the originating controller/loadbalancer id
-   * @param UUID is the UUID for the namespace owning the activation
-   * @param Boolean is true this is resource free message and false if this is a result forwarding message
-   */
-  type ActiveAck = (TransactionId, WhiskActivation, Boolean, ControllerInstanceId, UUID, Boolean) => Future[Any]
+  override def instance(
+    config: WhiskConfig,
+    instance: InvokerInstanceId,
+    producer: MessageProducer,
+    poolConfig: ContainerPoolConfig,
+    limitsConfig: ConcurrencyLimitConfig)(implicit actorSystem: ActorSystem, logging: Logging): InvokerCore =
+    new InvokerReactive(config, instance, producer, poolConfig, limitsConfig)
+
 }
 
 class InvokerReactive(
@@ -67,9 +64,9 @@ class InvokerReactive(
   poolConfig: ContainerPoolConfig = loadConfigOrThrow[ContainerPoolConfig](ConfigKeys.containerPool),
   limitsConfig: ConcurrencyLimitConfig = loadConfigOrThrow[ConcurrencyLimitConfig](ConfigKeys.concurrencyLimit))(
   implicit actorSystem: ActorSystem,
-  logging: Logging) {
+  logging: Logging)
+    extends InvokerCore {
 
-  implicit val materializer: ActorMaterializer = ActorMaterializer()
   implicit val ec: ExecutionContext = actorSystem.dispatcher
   implicit val cfg: WhiskConfig = config
 
@@ -96,12 +93,17 @@ class InvokerReactive(
           "--ulimit" -> Set("nofile=1024:1024"),
           "--pids-limit" -> Set("1024")) ++ logsProvider.containerParameters)
   containerFactory.init()
-  sys.addShutdownHook(containerFactory.cleanup())
+
+  CoordinatedShutdown(actorSystem)
+    .addTask(CoordinatedShutdown.PhaseBeforeActorSystemTerminate, "cleanup runtime containers") { () =>
+      containerFactory.cleanup()
+      Future.successful(Done)
+    }
 
   /** Initialize needed databases */
   private val entityStore = WhiskEntityStore.datastore()
   private val activationStore =
-    SpiLoader.get[ActivationStoreProvider].instance(actorSystem, materializer, logging)
+    SpiLoader.get[ActivationStoreProvider].instance(actorSystem, logging)
 
   private val authStore = WhiskAuthStore.datastore()
 
@@ -116,8 +118,8 @@ class InvokerReactive(
   }
 
   /** Initialize message consumers */
-  private val topic = s"invoker${instance.toInt}"
-  private val maximumContainers = (poolConfig.userMemory / MemoryLimit.minMemory).toInt
+  private val topic = s"${Invoker.topicPrefix}invoker${instance.toInt}"
+  private val maximumContainers = (poolConfig.userMemory / MemoryLimit.MIN_MEMORY).toInt
   private val msgProvider = SpiLoader.get[MessagingProvider]
 
   //number of peeked messages - increasing the concurrentPeekFactor improves concurrent usage, but adds risk for message loss in case of crash
@@ -131,69 +133,91 @@ class InvokerReactive(
     new MessageFeed("activation", logging, consumer, maxPeek, 1.second, processActivationMessage)
   })
 
-  /** Sends an active-ack. */
-  private val ack: InvokerReactive.ActiveAck = (tid: TransactionId,
-                                                activationResult: WhiskActivation,
-                                                blockingInvoke: Boolean,
-                                                controllerInstance: ControllerInstanceId,
-                                                userId: UUID,
-                                                isSlotFree: Boolean) => {
-    implicit val transid: TransactionId = tid
-
-    def send(res: Either[ActivationId, WhiskActivation], recovery: Boolean = false) = {
-      val msg = if (isSlotFree) {
-        val aid = res.fold(identity, _.activationId)
-        val isWhiskSystemError = res.fold(_ => false, _.response.isWhiskError)
-        CompletionMessage(transid, aid, isWhiskSystemError, instance)
-      } else {
-        ResultMessage(transid, res)
-      }
-
-      producer.send(topic = "completed" + controllerInstance.asString, msg).andThen {
-        case Success(_) =>
-          logging.info(
-            this,
-            s"posted ${if (recovery) "recovery" else "completion"} of activation ${activationResult.activationId}")
-      }
-    }
-
-    // UserMetrics are sent, when the slot is free again. This ensures, that all metrics are sent.
-    if (UserEvents.enabled && isSlotFree) {
-      EventMessage.from(activationResult, s"invoker${instance.instance}", userId) match {
-        case Success(msg) => UserEvents.send(producer, msg)
-        case Failure(t)   => logging.error(this, s"activation event was not sent: $t")
-      }
-    }
-
-    send(Right(if (blockingInvoke) activationResult else activationResult.withoutLogsOrResult)).recoverWith {
-      case t if t.getCause.isInstanceOf[RecordTooLargeException] =>
-        send(Left(activationResult.activationId), recovery = true)
-    }
+  private val ack = {
+    val sender = if (UserEvents.enabled) Some(new UserEventSender(producer)) else None
+    new MessagingActiveAck(producer, instance, sender)
   }
 
+  private val collectLogs = new LogStoreCollector(logsProvider)
+
   /** Stores an activation in the database. */
-  private val store = (tid: TransactionId, activation: WhiskActivation, context: UserContext) => {
+  private val store = (tid: TransactionId, activation: WhiskActivation, isBlocking: Boolean, context: UserContext) => {
     implicit val transid: TransactionId = tid
-    activationStore.storeAfterCheck(activation, context)(tid, notifier = None)
+    activationStore.storeAfterCheck(activation, isBlocking, None, context)(tid, notifier = None, logging)
   }
 
   /** Creates a ContainerProxy Actor when being called. */
   private val childFactory = (f: ActorRefFactory) =>
     f.actorOf(
       ContainerProxy
-        .props(containerFactory.createContainer, ack, store, logsProvider.collectLogs, instance, poolConfig))
+        .props(containerFactory.createContainer, ack, store, collectLogs, instance, poolConfig))
 
   val prewarmingConfigs: List[PrewarmingConfig] = {
     ExecManifest.runtimesManifest.stemcells.flatMap {
       case (mf, cells) =>
         cells.map { cell =>
-          PrewarmingConfig(cell.count, new CodeExecAsString(mf, "", None), cell.memory)
+          PrewarmingConfig(cell.initialCount, new CodeExecAsString(mf, "", None), cell.memory, cell.reactive)
         }
     }.toList
   }
 
   private val pool =
     actorSystem.actorOf(ContainerPool.props(childFactory, poolConfig, activationFeed, prewarmingConfigs))
+
+  def handleActivationMessage(msg: ActivationMessage)(implicit transid: TransactionId): Future[Unit] = {
+    val namespace = msg.action.path
+    val name = msg.action.name
+    val actionid = FullyQualifiedEntityName(namespace, name).toDocId.asDocInfo(msg.revision)
+    val subject = msg.user.subject
+
+    logging.debug(this, s"${actionid.id} $subject ${msg.activationId}")
+
+    // caching is enabled since actions have revision id and an updated
+    // action will not hit in the cache due to change in the revision id;
+    // if the doc revision is missing, then bypass cache
+    if (actionid.rev == DocRevision.empty) logging.warn(this, s"revision was not provided for ${actionid.id}")
+
+    WhiskAction
+      .get(entityStore, actionid.id, actionid.rev, fromCache = actionid.rev != DocRevision.empty)
+      .flatMap(action => {
+        action.toExecutableWhiskAction match {
+          case Some(executable) =>
+            pool ! Run(executable, msg)
+            Future.successful(())
+          case None =>
+            logging.error(this, s"non-executable action reached the invoker ${action.fullyQualifiedName(false)}")
+            Future.failed(new IllegalStateException("non-executable action reached the invoker"))
+        }
+      })
+      .recoverWith {
+        case DocumentRevisionMismatchException(_) =>
+          // if revision is mismatched, the action may have been updated,
+          // so try again with the latest code
+          handleActivationMessage(msg.copy(revision = DocRevision.empty))
+        case t =>
+          val response = t match {
+            case _: NoDocumentException =>
+              ActivationResponse.applicationError(Messages.actionRemovedWhileInvoking)
+            case _: DocumentTypeMismatchException | _: DocumentUnreadable =>
+              ActivationResponse.whiskError(Messages.actionMismatchWhileInvoking)
+            case _ =>
+              ActivationResponse.whiskError(Messages.actionFetchErrorWhileInvoking)
+          }
+          activationFeed ! MessageFeed.Processed
+
+          val activation = generateFallbackActivation(msg, response)
+          ack(
+            msg.transid,
+            activation,
+            msg.blocking,
+            msg.rootControllerIndex,
+            msg.user.namespace.uuid,
+            CombinedCompletionAndResultMessage(transid, activation, instance))
+
+          store(msg.transid, activation, msg.blocking, UserContext(msg.user))
+          Future.successful(())
+      }
+  }
 
   /** Is called when an ActivationMessage is read from Kafka */
   def processActivationMessage(bytes: Array[Byte]): Future[Unit] = {
@@ -210,58 +234,22 @@ class InvokerReactive(
 
         if (!namespaceBlacklist.isBlacklisted(msg.user)) {
           val start = transid.started(this, LoggingMarkers.INVOKER_ACTIVATION, logLevel = InfoLevel)
-          val namespace = msg.action.path
-          val name = msg.action.name
-          val actionid = FullyQualifiedEntityName(namespace, name).toDocId.asDocInfo(msg.revision)
-          val subject = msg.user.subject
-
-          logging.debug(this, s"${actionid.id} $subject ${msg.activationId}")
-
-          // caching is enabled since actions have revision id and an updated
-          // action will not hit in the cache due to change in the revision id;
-          // if the doc revision is missing, then bypass cache
-          if (actionid.rev == DocRevision.empty) logging.warn(this, s"revision was not provided for ${actionid.id}")
-
-          WhiskAction
-            .get(entityStore, actionid.id, actionid.rev, fromCache = actionid.rev != DocRevision.empty)
-            .flatMap { action =>
-              action.toExecutableWhiskAction match {
-                case Some(executable) =>
-                  pool ! Run(executable, msg)
-                  Future.successful(())
-                case None =>
-                  logging.error(this, s"non-executable action reached the invoker ${action.fullyQualifiedName(false)}")
-                  Future.failed(new IllegalStateException("non-executable action reached the invoker"))
-              }
-            }
-            .recoverWith {
-              case t =>
-                // If the action cannot be found, the user has concurrently deleted it,
-                // making this an application error. All other errors are considered system
-                // errors and should cause the invoker to be considered unhealthy.
-                val response = t match {
-                  case _: NoDocumentException =>
-                    ActivationResponse.applicationError(Messages.actionRemovedWhileInvoking)
-                  case _: DocumentTypeMismatchException | _: DocumentUnreadable =>
-                    ActivationResponse.whiskError(Messages.actionMismatchWhileInvoking)
-                  case _ =>
-                    ActivationResponse.whiskError(Messages.actionFetchErrorWhileInvoking)
-                }
-
-                val context = UserContext(msg.user)
-                val activation = generateFallbackActivation(msg, response)
-                activationFeed ! MessageFeed.Processed
-                ack(msg.transid, activation, msg.blocking, msg.rootControllerIndex, msg.user.namespace.uuid, true)
-                store(msg.transid, activation, context)
-                Future.successful(())
-            }
+          handleActivationMessage(msg)
         } else {
           // Iff the current namespace is blacklisted, an active-ack is only produced to keep the loadbalancer protocol
           // Due to the protective nature of the blacklist, a database entry is not written.
           activationFeed ! MessageFeed.Processed
+
           val activation =
             generateFallbackActivation(msg, ActivationResponse.applicationError(Messages.namespacesBlacklisted))
-          ack(msg.transid, activation, false, msg.rootControllerIndex, msg.user.namespace.uuid, true)
+          ack(
+            msg.transid,
+            activation,
+            false,
+            msg.rootControllerIndex,
+            msg.user.namespace.uuid,
+            CombinedCompletionAndResultMessage(transid, activation, instance))
+
           logging.warn(this, s"namespace ${msg.user.namespace.name} was blocked in invoker.")
           Future.successful(())
         }
@@ -276,7 +264,11 @@ class InvokerReactive(
       }
   }
 
-  /** Generates an activation with zero runtime. Usually used for error cases */
+  /**
+   * Generates an activation with zero runtime. Usually used for error cases.
+   *
+   * Set the kind annotation to `Exec.UNKNOWN` since it is not known to the invoker because the action fetch failed.
+   */
   private def generateFallbackActivation(msg: ActivationMessage, response: ActivationResponse): WhiskActivation = {
     val now = Instant.now
     val causedBy = if (msg.causedBySequence) {
@@ -295,8 +287,24 @@ class InvokerReactive(
       duration = Some(0),
       response = response,
       annotations = {
-        Parameters(WhiskActivation.pathAnnotation, JsString(msg.action.asString)) ++ causedBy
+        Parameters(WhiskActivation.pathAnnotation, JsString(msg.action.copy(version = None).asString)) ++
+          Parameters(WhiskActivation.kindAnnotation, JsString(Exec.UNKNOWN)) ++ causedBy
       })
+  }
+
+  private val healthProducer = msgProvider.getProducer(config)
+  Scheduler.scheduleWaitAtMost(1.seconds)(() => {
+    healthProducer.send(s"${Invoker.topicPrefix}health", PingMessage(instance)).andThen {
+      case Failure(t) => logging.error(this, s"failed to ping the controller: $t")
+    }
+  })
+
+  override def enable(): Route = {
+    complete("not supported")
+  }
+
+  override def disable(): Route = {
+    complete("not supported")
   }
 
 }

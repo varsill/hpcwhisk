@@ -293,13 +293,22 @@ class PackagesApiTests extends ControllerTestCommon with WhiskPackagesApi {
     Get(s"$collectionPath/${provider.name}") ~> Route.seal(routes(creds)) ~> check {
       status should be(OK)
       val response = responseAs[WhiskPackageWithActions]
-      response should be(provider withActions ())
+      response should be(provider.withActions())
     }
+  }
+
+  it should "get package with updated field" in {
+    implicit val tid = transid()
+    val provider = WhiskPackage(namespace, aname(), None)
+    put(entityStore, provider)
+
+    // `updated` field should be compared with a document in DB
+    val pkg = get(entityStore, provider.docid, WhiskPackage)
 
     Get(s"$collectionPath/${provider.name}") ~> Route.seal(routes(creds)) ~> check {
       status should be(OK)
       val response = responseAs[WhiskPackageWithActions]
-      response should be(provider withActions ())
+      response should be(provider.copy(updated = pkg.updated).withActions())
     }
   }
 
@@ -312,7 +321,7 @@ class PackagesApiTests extends ControllerTestCommon with WhiskPackagesApi {
     Get(s"$collectionPath/${reference.name}") ~> Route.seal(routes(creds)) ~> check {
       status should be(OK)
       val response = responseAs[WhiskPackageWithActions]
-      response should be(reference inherit provider.parameters withActions ())
+      response should be(reference.inherit(provider.parameters).withActions())
       // this is redundant in case the precedence orders on inherit are changed incorrectly
       response.wp.parameters should be(Parameters("a", "A") ++ Parameters("b", "b") ++ Parameters("c", "C"))
     }
@@ -428,7 +437,7 @@ class PackagesApiTests extends ControllerTestCommon with WhiskPackagesApi {
       deletePackage(provider.docid)
       status should be(OK)
       val response = responseAs[WhiskPackage]
-      response should be(provider)
+      checkWhiskEntityResponse(response, provider)
     }
   }
 
@@ -498,7 +507,7 @@ class PackagesApiTests extends ControllerTestCommon with WhiskPackagesApi {
       deletePackage(reference.docid)
       status should be(OK)
       val response = responseAs[WhiskPackage]
-      response should be(reference)
+      checkWhiskEntityResponse(response, reference)
     }
   }
 
@@ -528,13 +537,13 @@ class PackagesApiTests extends ControllerTestCommon with WhiskPackagesApi {
       deletePackage(reference.docid)
       status should be(OK)
       val response = responseAs[WhiskPackage]
-      response should be {
+      checkWhiskEntityResponse(
+        response,
         WhiskPackage(
           reference.namespace,
           reference.name,
           provider.bind,
-          annotations = bindingAnnotation(provider.bind.get))
-      }
+          annotations = bindingAnnotation(provider.bind.get)))
     }
   }
 
@@ -582,7 +591,7 @@ class PackagesApiTests extends ControllerTestCommon with WhiskPackagesApi {
     } reduce (_ ++ _)
     val content = s"""{"annotations":$annotations}""".parseJson.asJsObject
     Put(s"$collectionPath/${aname()}", content) ~> Route.seal(routes(creds)) ~> check {
-      status should be(RequestEntityTooLarge)
+      status should be(PayloadTooLarge)
       responseAs[String] should include {
         Messages.entityTooBig(SizeError(WhiskEntity.annotationsFieldName, annotations.size, Parameters.sizeLimit))
       }
@@ -598,7 +607,7 @@ class PackagesApiTests extends ControllerTestCommon with WhiskPackagesApi {
     } reduce (_ ++ _)
     val content = s"""{"parameters":$parameters}""".parseJson.asJsObject
     Put(s"$collectionPath/${aname()}", content) ~> Route.seal(routes(creds)) ~> check {
-      status should be(RequestEntityTooLarge)
+      status should be(PayloadTooLarge)
       responseAs[String] should include {
         Messages.entityTooBig(SizeError(WhiskEntity.paramsFieldName, parameters.size, Parameters.sizeLimit))
       }
@@ -616,7 +625,7 @@ class PackagesApiTests extends ControllerTestCommon with WhiskPackagesApi {
     val content = s"""{"parameters":$parameters}""".parseJson.asJsObject
     put(entityStore, provider)
     Put(s"$collectionPath/${aname()}?overwrite=true", content) ~> Route.seal(routes(creds)) ~> check {
-      status should be(RequestEntityTooLarge)
+      status should be(PayloadTooLarge)
       responseAs[String] should include {
         Messages.entityTooBig(SizeError(WhiskEntity.paramsFieldName, parameters.size, Parameters.sizeLimit))
       }
@@ -638,7 +647,8 @@ class PackagesApiTests extends ControllerTestCommon with WhiskPackagesApi {
     Put(s"$collectionPath/${provider.name}?overwrite=true", content) ~> Route.seal(routes(creds)) ~> check {
       deletePackage(provider.docid)
       val response = responseAs[WhiskPackage]
-      response should be(
+      checkWhiskEntityResponse(
+        response,
         WhiskPackage(namespace, provider.name, None, version = provider.version.upPatch, publish = true))
     }
   }
@@ -663,15 +673,15 @@ class PackagesApiTests extends ControllerTestCommon with WhiskPackagesApi {
       deletePackage(reference.docid)
       status should be(OK)
       val response = responseAs[WhiskPackage]
-      response should be {
+      checkWhiskEntityResponse(
+        response,
         WhiskPackage(
           reference.namespace,
           reference.name,
           reference.binding,
           version = reference.version.upPatch,
           publish = true,
-          annotations = reference.annotations ++ Parameters("a", "b"))
-      }
+          annotations = reference.annotations ++ Parameters("a", "b")))
     }
   }
 
@@ -787,7 +797,7 @@ class PackagesApiTests extends ControllerTestCommon with WhiskPackagesApi {
     }
   }
 
-  it should "reject delete non-empty package" in {
+  it should "delete package and its actions if force flag is set to true" in {
     implicit val tid = transid()
     val provider = WhiskPackage(namespace, aname())
     val action = WhiskAction(provider.namespace.addPath(provider.name), aname(), jsDefault("??"))
@@ -801,10 +811,32 @@ class PackagesApiTests extends ControllerTestCommon with WhiskPackagesApi {
       }
     }
 
+    Delete(s"$collectionPath/${provider.name}?force=true") ~> Route.seal(routes(creds)) ~> check {
+      status should be(OK)
+      val response = responseAs[WhiskPackage]
+      response should be(provider)
+    }
+  }
+
+  it should "reject delete non-empty package if force flag is not set" in {
+    implicit val tid = transid()
+    val provider = WhiskPackage(namespace, aname())
+    val action = WhiskAction(provider.namespace.addPath(provider.name), aname(), jsDefault("??"))
+    put(entityStore, provider)
+    put(entityStore, action)
+    org.apache.openwhisk.utils.retry {
+      Get(s"$collectionPath/${provider.name}") ~> Route.seal(routes(creds)) ~> check {
+        status should be(OK)
+        val response = responseAs[JsObject]
+        response.fields("actions").asInstanceOf[JsArray].elements.length should be(1)
+      }
+    }
+
+    val exceptionString = "Package not empty (contains 1 entity). Set force param or delete package contents."
     Delete(s"$collectionPath/${provider.name}") ~> Route.seal(routes(creds)) ~> check {
       status should be(Conflict)
       val response = responseAs[ErrorResponse]
-      response.error should include("Package not empty (contains 1 entity)")
+      response.error should include(exceptionString)
       response.code.id should not be empty
     }
   }
@@ -872,6 +904,60 @@ class PackagesApiTests extends ControllerTestCommon with WhiskPackagesApi {
     Put(s"$collectionPath/${entity.name}", content) ~> Route.seal(routes(creds)) ~> check {
       status should be(InternalServerError)
       responseAs[ErrorResponse].error shouldBe Messages.corruptedEntity
+    }
+  }
+
+  var testExecuteOnly = false
+  override def executeOnly = testExecuteOnly
+
+  it should ("allow access to get of shared package binding when config option is disabled") in {
+    testExecuteOnly = false
+    implicit val tid = transid()
+    val auser = WhiskAuthHelpers.newIdentity()
+    val provider = WhiskPackage(namespace, aname(), None, Parameters("p", "P"), publish = true)
+    val binding = WhiskPackage(EntityPath(auser.subject.asString), aname(), provider.bind, Parameters("b", "B"))
+    put(entityStore, provider)
+    put(entityStore, binding)
+    Get(s"/$namespace/${collection.path}/${provider.name}") ~> Route.seal(routes(auser)) ~> check {
+      status should be(OK)
+    }
+  }
+
+  it should ("allow access to get of shared package when config option is disabled") in {
+    testExecuteOnly = false
+    implicit val tid = transid()
+    val auser = WhiskAuthHelpers.newIdentity()
+    val provider = WhiskPackage(namespace, aname(), None, publish = true)
+    put(entityStore, provider)
+
+    Get(s"/$namespace/${collection.path}/${provider.name}") ~> Route.seal(routes(auser)) ~> check {
+      status should be(OK)
+    }
+  }
+
+  it should ("deny access to get of shared package binding when config option is enabled") in {
+    testExecuteOnly = true
+    implicit val tid = transid()
+    val auser = WhiskAuthHelpers.newIdentity()
+    val provider = WhiskPackage(namespace, aname(), None, Parameters("p", "P"), publish = true)
+    val binding = WhiskPackage(EntityPath(auser.subject.asString), aname(), provider.bind, Parameters("b", "B"))
+    put(entityStore, provider)
+    put(entityStore, binding)
+    Get(s"/$namespace/${collection.path}/${provider.name}") ~> Route.seal(routes(auser)) ~> check {
+      status should be(Forbidden)
+    }
+
+  }
+
+  it should ("deny access to get of shared package when config option is enabled") in {
+    testExecuteOnly = true
+    implicit val tid = transid()
+    val auser = WhiskAuthHelpers.newIdentity()
+    val provider = WhiskPackage(namespace, aname(), None, publish = true)
+    put(entityStore, provider)
+
+    Get(s"/$namespace/${collection.path}/${provider.name}") ~> Route.seal(routes(auser)) ~> check {
+      status should be(Forbidden)
     }
   }
 }
