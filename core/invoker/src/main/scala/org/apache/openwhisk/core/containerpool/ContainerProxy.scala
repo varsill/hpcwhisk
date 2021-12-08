@@ -43,7 +43,8 @@ import spray.json._
 import org.apache.openwhisk.common.{AkkaLogging, Counter, LoggingMarkers, MetricEmitter, TransactionId}
 import org.apache.openwhisk.core.ConfigKeys
 import org.apache.openwhisk.core.ack.ActiveAck
-import org.apache.openwhisk.core.connector.{ActivationMessage, CombinedCompletionAndResultMessage, CompletionMessage, ResultMessage}
+import org.apache.openwhisk.core.connector.MessageFeed.GracefulShutdown
+import org.apache.openwhisk.core.connector.{ActivationMessage, CombinedCompletionAndResultMessage, CompletionMessage, Message, ResultMessage}
 import org.apache.openwhisk.core.database.UserContext
 import org.apache.openwhisk.core.entity.ExecManifest.ImageName
 import org.apache.openwhisk.core.entity._
@@ -247,6 +248,7 @@ class ContainerProxy(factory: (TransactionId,
                      collectLogs: LogsCollector,
                      instance: InvokerInstanceId,
                      poolConfig: ContainerPoolConfig,
+                     returnMsg: Option[Message => Future[Unit]],
                      healtCheckConfig: ContainerProxyHealthCheckConfig,
                      activationErrorLoggingConfig: ContainerProxyActivationErrorLogConfig,
                      unusedTimeout: FiniteDuration,
@@ -261,6 +263,9 @@ class ContainerProxy(factory: (TransactionId,
   var runBuffer = immutable.Queue.empty[Run] //does not retain order, but does manage jobs that would have pushed past action concurrency limit
   //track buffer processing state to avoid extra transitions near end of buffer - this provides a pseudo-state between Running and Ready
   var bufferProcessing = false
+
+  @volatile
+  var gracefulShutdown = false
 
   //keep a separate count to avoid confusion with ContainerState.activeActivationCount that is tracked/modified only in ContainerPool
   var activeCount = 0;
@@ -324,15 +329,19 @@ class ContainerProxy(factory: (TransactionId,
             // also update the feed and active ack; the container cleanup is queued
             // implicitly via a akka.actor.Status.Failure which will be processed later when the state
             // transitions to Running
-            val activation = ContainerProxy.constructWhiskActivation(job, None, Interval.zero, false, response)
-            sendActiveAck(
-              transid,
-              activation,
-              job.msg.blocking,
-              job.msg.rootControllerIndex,
-              job.msg.user.namespace.uuid,
-              CombinedCompletionAndResultMessage(transid, activation, instance))
-            storeActivation(transid, activation, job.msg.blocking, context)
+            if (!gracefulShutdown) {
+              val activation = ContainerProxy.constructWhiskActivation(job, None, Interval.zero, false, response)
+              sendActiveAck(
+                transid,
+                activation,
+                job.msg.blocking,
+                job.msg.rootControllerIndex,
+                job.msg.user.namespace.uuid,
+                CombinedCompletionAndResultMessage(transid, activation, instance))
+              storeActivation(transid, activation, job.msg.blocking, context)
+            } else {
+              returnMsg.map(f => f(job.msg))
+            }
         }
         .flatMap { container =>
           // now attempt to inject the user code and run the action
@@ -368,6 +377,10 @@ class ContainerProxy(factory: (TransactionId,
       goto(Running) using PreWarmedData(data.container, data.kind, data.memoryLimit, 1, data.expires)
 
     case Event(Remove, data: PreWarmedData) => destroyContainer(data, false)
+    case Event(GracefulShutdown, data: PreWarmedData) =>
+      logging.info(this, "Graceful shutdown")
+      gracefulShutdown = true
+      destroyContainer(data, false)
 
     // prewarm container failed
     case Event(_: akka.actor.Status.Failure, data: PreWarmedData) =>
@@ -430,6 +443,11 @@ class ContainerProxy(factory: (TransactionId,
         .map(_ => RunCompleted)
         .pipeTo(self)
       stay() using data
+
+    case Event(GracefulShutdown, data: ContainerStarted) =>
+      logging.info(this, "Graceful shutdown")
+      gracefulShutdown = true
+      destroyContainer(data, false)
 
     //ContainerHealthError should cause rescheduling of the job
     case Event(akka.actor.Status.Failure(e: ContainerHealthError), data: WarmedData) =>
@@ -510,6 +528,10 @@ class ContainerProxy(factory: (TransactionId,
       goto(Pausing)
 
     case Event(Remove, data: WarmedData) => destroyContainer(data, true)
+    case Event(GracefulShutdown, data: ContainerStarted) =>
+      logging.info(this, "Graceful shutdown")
+      gracefulShutdown = true
+      destroyContainer(data, false)
 
     // warm container failed
     case Event(_: akka.actor.Status.Failure, data: WarmedData) =>
@@ -546,6 +568,10 @@ class ContainerProxy(factory: (TransactionId,
     case Event(StateTimeout | Remove, data: WarmedData) =>
       rescheduleJob = true // to suppress sending message to the pool and not double count
       destroyContainer(data, true)
+    case Event(GracefulShutdown, data: WarmedData) =>
+      gracefulShutdown = true
+      rescheduleJob = true
+      destroyContainer(data, true)
   }
 
   when(Removing) {
@@ -564,7 +590,11 @@ class ContainerProxy(factory: (TransactionId,
         stay using newData
       }
     case Event(ContainerRemoved(_), _) =>
-      stop()
+      logging.info(this, "Container removed")
+      if (!gracefulShutdown)
+        stop()
+      else
+        stay()
     // Run failed, after another failed concurrent Run
     case Event(_: akka.actor.Status.Failure, data: WarmedData) =>
       activeCount -= 1
@@ -822,30 +852,36 @@ class ContainerProxy(factory: (TransactionId,
             actionTimeout,
             job.action.limits.concurrency.maxConcurrent,
             reschedule)(job.msg.transid)
-          .map {
+          .flatMap {
             case (runInterval, response) =>
-              val initRunInterval = initInterval
-                .map(i => Interval(runInterval.start.minusMillis(i.duration.toMillis), runInterval.end))
-                .getOrElse(runInterval)
-              ContainerProxy.constructWhiskActivation(
-                job,
-                initInterval,
-                initRunInterval,
-                runInterval.duration >= actionTimeout,
-                response)
+              if (gracefulShutdown && !response.isSuccess)
+                Future.failed(new RuntimeException("Failure during gracefulShutdown"))
+              else {
+                val initRunInterval = initInterval
+                  .map(i => Interval(runInterval.start.minusMillis(i.duration.toMillis), runInterval.end))
+                  .getOrElse(runInterval)
+                Future.successful(ContainerProxy.constructWhiskActivation(
+                  job,
+                  initInterval,
+                  initRunInterval,
+                  runInterval.duration >= actionTimeout,
+                  response))
+              }
           }
       }
       .recoverWith {
         case h: ContainerHealthError =>
           Future.failed(h)
         case InitializationError(interval, response) =>
-          Future.successful(
+          if (gracefulShutdown) Future.failed(InitializationError(interval, response))
+          else Future.successful(
             ContainerProxy
               .constructWhiskActivation(job, Some(interval), interval, interval.duration >= actionTimeout, response))
         case t =>
           // Actually, this should never happen - but we want to make sure to not miss a problem
           logging.error(this, s"caught unexpected error while running activation: ${t}")
-          Future.successful(
+          if (gracefulShutdown) Future.failed(t)
+          else Future.successful(
             ContainerProxy.constructWhiskActivation(
               job,
               None,
@@ -936,6 +972,13 @@ class ContainerProxy(factory: (TransactionId,
         }
         Future.failed(ActivationUnsuccessfulError(act))
       case Left(error) => Future.failed(error)
+    }.recoverWith {
+      case t =>
+        if (gracefulShutdown) {
+          logging.info(this, "Failure during graceful shutdown - resending to parent")
+          returnMsg.map(f => f(job.msg))
+        }
+        Future.failed(t)
     }
   }
   //to ensure we don't blow up logs with potentially large activation response error
@@ -973,6 +1016,7 @@ object ContainerProxy {
             collectLogs: LogsCollector,
             instance: InvokerInstanceId,
             poolConfig: ContainerPoolConfig,
+            returnMsg: Option[Message => Future[Unit]] = None,
             healthCheckConfig: ContainerProxyHealthCheckConfig =
               loadConfigOrThrow[ContainerProxyHealthCheckConfig](ConfigKeys.containerProxyHealth),
             activationErrorLogConfig: ContainerProxyActivationErrorLogConfig = activationErrorLogging,
@@ -987,6 +1031,7 @@ object ContainerProxy {
         collectLogs,
         instance,
         poolConfig,
+        returnMsg,
         healthCheckConfig,
         activationErrorLogConfig,
         unusedTimeout,

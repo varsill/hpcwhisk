@@ -123,8 +123,14 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
       val (item, remaining) = runBuffer.dequeue
       runBuffer = remaining
       returnMsg.map(i=> i(item.msg))
-      returnMessages()
     }
+    if (busyPool.nonEmpty) {
+      val (actor, _) = busyPool.head
+      actor ! GracefulShutdown
+      busyPool = busyPool.tail
+    }
+
+    if (runBuffer.nonEmpty || busyPool.nonEmpty) returnMessages()
   }
 
   def receive: Receive = {
