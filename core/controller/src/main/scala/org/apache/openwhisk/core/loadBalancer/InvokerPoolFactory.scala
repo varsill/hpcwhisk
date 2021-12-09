@@ -31,5 +31,6 @@ trait InvokerPoolFactory {
     messagingProvider: MessagingProvider,
     messagingProducer: MessageProducer,
     sendActivationToInvoker: (MessageProducer, ActivationMessage, InvokerInstanceId) => Future[RecordMetadata],
+    sendActivationToFastlane: (MessageProducer, Array[Byte]) => Future[RecordMetadata],
     monitor: Option[ActorRef]): ActorRef
 }
