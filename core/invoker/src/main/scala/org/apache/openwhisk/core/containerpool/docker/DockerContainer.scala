@@ -40,6 +40,8 @@ import org.apache.openwhisk.core.containerpool.logging.LogLine
 import org.apache.openwhisk.core.entity.ExecManifest.ImageName
 import org.apache.openwhisk.http.Messages
 
+import scala.util.Try
+
 object DockerContainer {
 
   private val byteStringSentinel = ByteString(Container.ACTIVATION_LOG_SENTINEL)
@@ -219,7 +221,7 @@ class DockerContainer(protected val id: ContainerId,
     reschedule: Boolean = false)(implicit transid: TransactionId): Future[RunResult] = {
     val started = Instant.now()
     val http = httpConnection.getOrElse {
-      val conn = if (Container.config.akkaClient) {
+      val conn = if (Try(Container.config.akkaClient.toBoolean).getOrElse(false)) {
         new AkkaContainerClient(
           addr.host,
           addr.port,

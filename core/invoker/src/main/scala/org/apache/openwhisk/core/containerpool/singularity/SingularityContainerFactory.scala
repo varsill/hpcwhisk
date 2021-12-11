@@ -32,6 +32,7 @@ import org.apache.openwhisk.core.containerpool.ContainerArgsConfig
 import org.apache.openwhisk.core.entity.ByteSize
 import org.apache.openwhisk.core.entity.ExecManifest
 import org.apache.openwhisk.core.entity.InvokerInstanceId
+import org.apache.openwhisk.core.containerpool.singularity.SingularityContainer
 
 import scala.concurrent.duration._
 import pureconfig.generic.auto._
