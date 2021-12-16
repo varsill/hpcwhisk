@@ -23,6 +23,7 @@ import akka.actor.ActorSystem
 import akka.event.Logging.InfoLevel
 import akka.stream.scaladsl.Source
 import akka.util.ByteString
+import scala.util.Try
 import pureconfig._
 import pureconfig.generic.auto._
 import spray.json.DefaultJsonProtocol._
@@ -221,7 +222,7 @@ trait Container {
       }
   }
   private def openConnections(timeout: FiniteDuration, maxConcurrent: Int) = {
-    if (Container.config.akkaClient) {
+    if (Try(Container.config.akkaClient.toBoolean).getOrElse(false)) {
       new AkkaContainerClient(
         addr.host,
         addr.port,

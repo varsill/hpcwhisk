@@ -31,6 +31,8 @@ import org.apache.openwhisk.common.TransactionId
 import org.apache.openwhisk.core.containerpool._
 import org.apache.openwhisk.core.entity.ActivationResponse.{ConnectionError, MemoryExhausted}
 import org.apache.openwhisk.core.entity.{ActivationEntityLimit, ByteSize}
+
+import scala.util.Try
 // import org.apache.openwhisk.core.entity.size._
 import akka.stream.scaladsl.{Framing, Source}
 import akka.stream.stage._
@@ -215,7 +217,7 @@ class SingularityContainer(protected val id: ContainerId,
                                        reschedule: Boolean = false)(implicit transid: TransactionId): Future[RunResult] = {
     val started = Instant.now()
     val http = httpConnection.getOrElse {
-      val conn = if (Container.config.akkaClient) {
+      val conn = if (Try(Container.config.akkaClient.toBoolean).getOrElse(false)) {
         new AkkaContainerClient(addr.host, addr.port, timeout, ActivationEntityLimit.MAX_ACTIVATION_ENTITY_LIMIT, ActivationEntityLimit.MAX_ACTIVATION_ENTITY_LIMIT, 1024)
       } else {
         new ApacheBlockingContainerClient(

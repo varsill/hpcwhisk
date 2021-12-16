@@ -22,11 +22,13 @@ import pureconfig.generic.auto._
 import org.apache.openwhisk.core.ConfigKeys
 import org.apache.openwhisk.core.connector.{EventMessage, MessageProducer}
 
+import scala.util.Try
+
 object UserEvents {
 
-  case class UserEventsConfig(enabled: Boolean)
+  case class UserEventsConfig(enabled: String)
 
-  val enabled = loadConfigOrThrow[UserEventsConfig](ConfigKeys.userEvents).enabled
+  val enabled = Try(loadConfigOrThrow[UserEventsConfig](ConfigKeys.userEvents).enabled.toBoolean).getOrElse(false)
 
   val userEventTopicPrefix = loadConfigOrThrow[String](ConfigKeys.kafkaTopicsUserEventPrefix)
 

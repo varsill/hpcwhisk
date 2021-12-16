@@ -197,6 +197,15 @@ abstract class CommonLoadBalancer(config: WhiskConfig,
     }
   }
 
+  protected def sendActivationToFastlane(producer: MessageProducer, bytes: Array[Byte]): Future[RecordMetadata] = {
+    Future(ActivationMessage.parse(new String(bytes, StandardCharsets.UTF_8)))
+      .flatMap(Future.fromTry)
+      .flatMap { msg =>
+        logging.info(this, s"Sending invocation to fastlane ${msg}")
+        producer.send("fastlane", msg)
+      }
+  }
+
   /** Subscribes to ack messages from the invokers (result / completion) and registers a handler for these messages. */
   private val activationFeed: ActorRef =
     feedFactory.createFeed(actorSystem, messagingProvider, processAcknowledgement)

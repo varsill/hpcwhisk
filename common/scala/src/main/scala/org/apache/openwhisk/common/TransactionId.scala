@@ -219,16 +219,16 @@ protected case class TransactionMetadata(id: String,
 }
 
 case class MetricConfig(prometheusEnabled: Boolean,
-                        kamonEnabled: Boolean,
-                        kamonTagsEnabled: Boolean,
-                        logsEnabled: Boolean)
+                        kamonEnabled: String,
+                        kamonTagsEnabled: String,
+                        logsEnabled: String)
 object TransactionId {
   val metricConfig = loadConfigOrThrow[MetricConfig](ConfigKeys.metrics)
 
   // get the metric parameters directly from the environment since WhiskConfig can not be instantiated here
-  val metricsKamon: Boolean = metricConfig.kamonEnabled
-  val metricsKamonTags: Boolean = metricConfig.kamonTagsEnabled
-  val metricsLog: Boolean = metricConfig.logsEnabled
+  val metricsKamon: Boolean = Try(metricConfig.kamonEnabled.toBoolean).getOrElse(true)
+  val metricsKamonTags: Boolean = Try(metricConfig.kamonTagsEnabled.toBoolean).getOrElse(true)
+  val metricsLog: Boolean = Try(metricConfig.logsEnabled.toBoolean).getOrElse(true)
 
   val generatorConfig = loadConfigOrThrow[TransactionGeneratorConfig](ConfigKeys.transactions)
 

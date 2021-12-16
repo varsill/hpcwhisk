@@ -19,8 +19,8 @@ package org.apache.openwhisk.core.loadBalancer
 
 import akka.actor.ActorRef
 import akka.actor.ActorRefFactory
-import java.util.concurrent.ThreadLocalRandom
 
+import java.util.concurrent.ThreadLocalRandom
 import akka.actor.{Actor, ActorSystem, Cancellable, Props}
 import akka.cluster.ClusterEvent._
 import akka.cluster.{Cluster, Member, MemberStatus}
@@ -32,7 +32,7 @@ import pureconfig._
 import pureconfig.generic.auto._
 import org.apache.openwhisk.common._
 import org.apache.openwhisk.core.WhiskConfig._
-import org.apache.openwhisk.core.connector._
+import org.apache.openwhisk.core.connector.{MessageProducer, _}
 import org.apache.openwhisk.core.entity._
 import org.apache.openwhisk.core.entity.size.SizeLong
 import org.apache.openwhisk.common.LoggingMarkers._
@@ -321,6 +321,7 @@ class ShardingContainerPoolBalancer(
       messagingProvider,
       messageProducer,
       sendActivationToInvoker,
+      sendActivationToFastlane,
       Some(monitor))
 
   override protected def releaseInvoker(invoker: InvokerInstanceId, entry: ActivationEntry) = {
@@ -341,9 +342,11 @@ object ShardingContainerPoolBalancer extends LoadBalancerProvider {
         messagingProvider: MessagingProvider,
         messagingProducer: MessageProducer,
         sendActivationToInvoker: (MessageProducer, ActivationMessage, InvokerInstanceId) => Future[RecordMetadata],
+        sendActivationToFastlane: (MessageProducer, Array[Byte]) => Future[RecordMetadata],
         monitor: Option[ActorRef]): ActorRef = {
 
         InvokerPool.prepare(instance, WhiskEntityStore.datastore())
+
 
         actorRefFactory.actorOf(
           InvokerPool.props(
@@ -354,6 +357,10 @@ object ShardingContainerPoolBalancer extends LoadBalancerProvider {
               s"${Controller.topicPrefix}health${instance.asString}",
               s"${Controller.topicPrefix}health",
               maxPeek = 128),
+            (bytes) => sendActivationToFastlane(messagingProducer, bytes),
+            (i) => messagingProvider.getConsumer(whiskConfig,
+              s"${Controller.topicPrefix}invoker${i.toInt}",
+              s"${Controller.topicPrefix}invoker${i.toInt}", 10),
             monitor))
       }
 
