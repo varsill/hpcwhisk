@@ -18,7 +18,6 @@
 package org.apache.openwhisk.core.loadBalancer
 
 import java.nio.charset.StandardCharsets
-
 import scala.collection.immutable
 import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.concurrent.duration._
@@ -37,6 +36,8 @@ import org.apache.openwhisk.core.database.NoDocumentException
 import org.apache.openwhisk.core.entity.ActivationId.ActivationIdGenerator
 import org.apache.openwhisk.core.entity._
 import org.apache.openwhisk.core.entity.types.EntityStore
+
+import scala.annotation.tailrec
 
 // Received events
 case object GetStatus
@@ -78,6 +79,8 @@ final case class InvokerInfo(buffer: RingBuffer[InvocationFinishedResult])
 class InvokerPool(childFactory: (ActorRefFactory, InvokerInstanceId) => ActorRef,
                   sendActivationToInvoker: (ActivationMessage, InvokerInstanceId) => Future[RecordMetadata],
                   pingConsumer: MessageConsumer,
+                  sendActivationToFastlane: Array[Byte] => Future[RecordMetadata],
+                  getInvokerConsumer: InvokerInstanceId => MessageConsumer,
                   monitor: Option[ActorRef])
     extends Actor {
 
@@ -123,6 +126,7 @@ class InvokerPool(childFactory: (ActorRefFactory, InvokerInstanceId) => ActorRef
     case Transition(invoker, oldState: InvokerState, newState: InvokerState) =>
       refToInstance.get(invoker).foreach { instance =>
         status = status.updated(instance.toInt, new InvokerHealth(instance, newState))
+        if (oldState.isUsable && !newState.isUsable) migrateToFastlane(instance)
       }
       logStatus()
 
@@ -184,6 +188,22 @@ class InvokerPool(childFactory: (ActorRefFactory, InvokerInstanceId) => ActorRef
     ref
   }
 
+  def migrateToFastlane(instanceId: InvokerInstanceId): Future[Unit] = {
+    val consumer = getInvokerConsumer(instanceId)
+    logging.info(this, "Attempt migration")
+
+    @tailrec
+    def doMigrate(): Future[Unit] = {
+      val received = consumer.peek(30.seconds).toSeq
+      logging.info(this, s"Got ${received.length} messages")
+      consumer.commit() // Best effort
+      received.foreach(i => sendActivationToFastlane(i._4))
+      if(received.nonEmpty) doMigrate()
+      else Future.successful(consumer.close())
+    }
+    doMigrate()
+  }
+
 }
 
 object InvokerPool {
@@ -232,8 +252,10 @@ object InvokerPool {
   def props(f: (ActorRefFactory, InvokerInstanceId) => ActorRef,
             p: (ActivationMessage, InvokerInstanceId) => Future[RecordMetadata],
             pc: MessageConsumer,
+            sendActivationToFastlane: Array[Byte] => Future[RecordMetadata],
+            getInvokerConsumer: InvokerInstanceId => MessageConsumer,
             m: Option[ActorRef] = None): Props = {
-    Props(new InvokerPool(f, p, pc, m))
+    Props(new InvokerPool(f, p, pc, sendActivationToFastlane, getInvokerConsumer, m))
   }
 
   /** A stub identity for invoking the test action. This does not need to be a valid identity. */

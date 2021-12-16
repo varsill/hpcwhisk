@@ -189,7 +189,13 @@ object Invoker {
       abort(s"failure during msgProvider.ensureTopic for topic $topicName")
     }
 
-    val producer = msgProvider.getProducer(config, Some(ActivationEntityLimit.MAX_ACTIVATION_LIMIT))
+    if (msgProvider
+      .ensureTopic(config, topic = InvokerReactive.RETURN_TOPIC, topicConfig = topicBaseName, maxMessageBytes = maxMessageBytes)
+      .isFailure) {
+      abort(s"failure during msgProvider.ensureTopic for topic ${InvokerReactive.RETURN_TOPIC}")
+    }
+
+      val producer = msgProvider.getProducer(config, Some(ActivationEntityLimit.MAX_ACTIVATION_LIMIT))
     val invoker = try {
       SpiLoader.get[InvokerProvider].instance(config, invokerInstance, producer, poolConfig, limitConfig)
     } catch {
