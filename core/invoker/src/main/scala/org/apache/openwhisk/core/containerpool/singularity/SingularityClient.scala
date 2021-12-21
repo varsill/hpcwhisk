@@ -41,6 +41,7 @@ import org.apache.openwhisk.common.{Logging, LoggingMarkers, MetricEmitter, Tran
 import org.apache.openwhisk.core.ConfigKeys
 import org.apache.openwhisk.core.containerpool.ContainerId
 import org.apache.openwhisk.core.containerpool.ContainerAddress
+import spray.json._
 
 import scala.concurrent.duration.Duration
 
@@ -79,6 +80,18 @@ case class SingularityClientConfig(parallelRuns: Int, timeouts: SingularityClien
  * Image path for singularity client
  */
 case class SingularityImagePathConfig(imagePath: String)
+
+case class InstanceData(instance: String, pid: Int, img: String, logErrPath: String, logOutPath: String)
+
+protected object InstanceData extends DefaultJsonProtocol {
+  implicit val serdes = jsonFormat5(InstanceData.apply)
+}
+
+case class InstanceDataList(instances: List[InstanceData])
+
+protected object InstanceDataList extends DefaultJsonProtocol {
+  implicit val serdes = jsonFormat1(InstanceDataList.apply)
+}
 
 /**
  * Serves as interface to the singularity CLI tool.
@@ -126,7 +139,7 @@ class SingularityClient(singularityHost: Option[String] = None,
   }
   val clientVersion: String = getClientVersion()
 
-  protected val maxParallelRuns = 10 //config.parallelRuns
+  protected val maxParallelRuns = 1 //config.parallelRuns
   protected val runSemaphore =
     new Semaphore( /* permits= */ if (maxParallelRuns > 0) maxParallelRuns else Int.MaxValue, /* fair= */ true)
 
@@ -134,7 +147,7 @@ class SingularityClient(singularityHost: Option[String] = None,
   var port = 9000
   val r = new scala.util.Random
 
-  def run(image: String, args: Seq[String] = Seq.empty[String])(
+  def run(image: String, args: Seq[String] = Seq.empty[String], name: Option[String] = None)(
     implicit transid: TransactionId): Future[ContainerId] = {
       blocking {
         // Acquires a permit from this semaphore, blocking until one is available, or the thread is interrupted.
@@ -142,8 +155,10 @@ class SingularityClient(singularityHost: Option[String] = None,
         runSemaphore.acquire()
       }
 
-      val randomId = r.nextInt(1000000000)
-      val id = "c" ++ randomId.toString
+      val id = name.getOrElse({
+        val randomId = r.nextInt(1000000000)
+        "c" ++ randomId.toString
+      })
 
       while(containerIdToPortMap.values.exists(_ == port) && port < 9500) {
         port = port + 1
@@ -195,12 +210,12 @@ class SingularityClient(singularityHost: Option[String] = None,
     runCmd(Seq("instance", "stop", "--force", id.asString), config.timeouts.rm).map(_ => ())
   }
 
-  def ps(filters: Seq[(String, String)] = Seq.empty, all: Boolean = false)(
+  def ps()(
     implicit transid: TransactionId): Future[Seq[ContainerId]] = {
-//    val filterArgs = filters.flatMap { case (attr, value) => Seq("--filter", s"$attr=$value") }
-//    val allArg = if (all) Seq("--all") else Seq.empty[String]
-    val cmd = Seq("instance", "list") // ++ allArg ++ filterArgs
-    runCmd(cmd, config.timeouts.ps).map(_.lines.toSeq.map(ContainerId.apply))
+    val cmd = Seq("instance", "list", "-j")
+    runCmd(cmd, config.timeouts.ps)
+      .map(_.parseJson.convertTo[InstanceDataList])
+      .map(_.instances.map(i => ContainerId(i.instance)))
   }
 
   /**
@@ -252,9 +267,10 @@ trait SingularityApi {
    *
    * @param image the image to start the container with
    * @param args arguments for the singularity run command
+   * @param name desired container name
    * @return id of the started container
    */
-  def run(image: String, args: Seq[String] = Seq.empty[String])(implicit transid: TransactionId): Future[ContainerId]
+  def run(image: String, args: Seq[String] = Seq.empty[String], name: Option[String] = None)(implicit transid: TransactionId): Future[ContainerId]
 
   /**
    * Gets the IP address of a given container.
@@ -296,11 +312,9 @@ trait SingularityApi {
   /**
    * Returns a list of ContainerIds in the system.
    *
-   * @param filters Filters to apply to the 'ps' command
-   * @param all Whether or not to return stopped containers as well
    * @return A list of ContainerIds
    */
-  def ps(filters: Seq[(String, String)] = Seq.empty, all: Boolean = false)(
+  def ps()(
     implicit transid: TransactionId): Future[Seq[ContainerId]]
 
   /**

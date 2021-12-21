@@ -32,7 +32,6 @@ import org.apache.openwhisk.core.containerpool.ContainerArgsConfig
 import org.apache.openwhisk.core.entity.ByteSize
 import org.apache.openwhisk.core.entity.ExecManifest
 import org.apache.openwhisk.core.entity.InvokerInstanceId
-import org.apache.openwhisk.core.containerpool.singularity.SingularityContainer
 
 import scala.concurrent.duration._
 import pureconfig.generic.auto._
@@ -104,10 +103,12 @@ class SingularityContainerFactory(instance: InvokerInstanceId,
   private def removeAllActionContainers(): Unit = {
     implicit val transid = TransactionId.invoker
     val cleaning =
-      singularity.ps(filters = Seq("name" -> s"${ContainerFactory.containerNamePrefix(instance)}_"), all = true).flatMap {
+      singularity.ps()
+        .flatMap {
         containers =>
-          logging.info(this, s"removing ${containers.size} action containers.")
-          val removals = containers.map { id =>
+          val ownedContainers = containers.filter(_.asString.startsWith(s"${ContainerFactory.containerNamePrefix(instance)}_"))
+          logging.info(this, s"removing ${ownedContainers.size} action containers.")
+          val removals = ownedContainers.map { id =>
             (singularity.unpause(id))
               .recoverWith {
                 // Ignore resume failures and try to remove anyway

@@ -123,7 +123,7 @@ object SingularityContainer {
 
     for {
       pullSuccessful <- pulled
-      id <- singularity.run(imageToUse, args).recoverWith {
+      id <- singularity.run(imageToUse, args, name).recoverWith {
         case BrokenSingularityContainer(brokenId, _) =>
           // Remove the broken container - but don't wait or check for the result.
           // If the removal fails, there is nothing we could do to recover from the recovery.
