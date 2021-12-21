@@ -1,0 +1,3 @@
+{% for k, v in env.items() %}
+export {{k}}={{v |quote}}
+{% endfor %}

@@ -1,0 +1,127 @@
+- name: ensure invoker directory is created with permissions
+  file:
+    path: "{{ deploy_dir }}"
+    state: directory
+    mode: 0770
+  become: "{{ invoker.dir.become }}"
+
+# Work-around group quota issues by deploying to TMPDIR and moving with proper permissions
+- name: Create temp dir
+  tempfile:
+    state: directory
+  register: invoker_tmp
+
+- name: Unpack invoker distribution to temp dir
+  unarchive:
+    src: "{{ invoker.archive }}"
+    dest: "{{ invoker_tmp.path }}"
+    group: "{{ deploy_group }}"
+    mode: 'g+w'
+
+- name: Copy transformEnvironment
+  copy:
+    dest: "{{ invoker_tmp.path }}/invoker/bin"
+    src: "{{ openwhisk_home }}/common/scala/transformEnvironment.sh"
+    group: "{{ deploy_group }}"
+    mode: 0770
+
+- name: Copy SLURM runner
+  template:
+    src: "init.sh.j2"
+    dest: "{{ invoker_tmp.path }}/invoker/bin/init.sh"
+    group: "{{ deploy_group }}"
+    mode: 0770
+
+- name: Ensure invoker config directory is created with permissions
+  file:
+    path: "{{ invoker_tmp.path }}/invoker/conf"
+    state: directory
+    group: "{{ deploy_group }}"
+    mode: 0770
+
+- name: Ensure invoker log directory is created with permissions
+  file:
+    path: "{{ invoker_tmp.path }}/invoker/logs"
+    group: "{{ deploy_group }}"
+    state: directory
+    mode: 0777
+
+- name: "copy kafka truststore/keystore"
+  when: kafka.protocol == 'SSL'
+  copy:
+    src: "{{ openwhisk_home }}/ansible/roles/kafka/files/{{ kafka.ssl.keystore.name }}"
+    dest: "{{ invoker_tmp.path }}/invoker/conf"
+    group: "{{ deploy_group }}"
+
+- name: copy keystore, key and cert
+  when: invoker.protocol == "https"
+  copy:
+    src: "{{ inv_item }}"
+    mode: 0666
+    dest: "{{ invoker_tmp.path }}/invoker/conf"
+    group: "{{ deploy_group }}"
+  become: "{{ invoker.dir.become }}"
+  with_items:
+  - "{{ openwhisk_home }}/ansible/roles/invoker/files/{{ invoker.ssl.keystore.name }}"
+  - "{{ openwhisk_home }}/ansible/roles/invoker/files/{{ invoker.ssl.key }}"
+  - "{{ openwhisk_home }}/ansible/roles/invoker/files/{{ invoker.ssl.cert }}"
+  loop_control:
+    loop_var: inv_item
+
+- name: copy jmxremote password file
+  when: jmx.enabled
+  template:
+    src: "jmxremote.password.j2"
+    dest: "{{ invoker_tmp.path }}/invoker/conf/jmxremote.password"
+    group: "{{ deploy_group }}"
+    mode: 0770
+
+- name: copy jmxremote access file
+  when: jmx.enabled
+  template:
+    src: "jmxremote.access.j2"
+    dest: "{{ invoker_tmp.path }}/invoker/conf/jmxremote.access"
+    group: "{{ deploy_group }}"
+    mode: 0770
+
+- name: add additional jvm params if jmxremote is enabled
+  when: jmx.enabled
+  set_fact:
+    invoker_args: "{{ invoker.arguments }} {{ invoker.jmxremote.jvmArgs }}"
+
+- name: Load config from template
+  tags: ["test"]
+  set_fact:
+    openwhisk_config: "{{ lookup('template', '../invoker/templates/config.j2') | b64encode }}"
+
+- name: include invoker data
+  tags: ["test"]
+  include_tasks: "../invoker/tasks/env.yml"
+
+- name: native invoker env
+  set_fact:
+    native_env:
+      "JAVA_OPTS": "-Xmx{{ invoker.heap }} -XX:+CrashOnOutOfMemoryError -XX:+UseGCOverheadLimit -XX:ErrorFile={{ deploy_dir }}/logs/java_error.log"
+      "CONFIG_whisk_kafka_common_sslTruststoreLocation": "{{ deploy_dir }}/conf/{{ kafka.ssl.keystore.name }}"
+      "CONFIG_whisk_kafka_common_sslKeystoreLocation": "{{ deploy_dir }}/conf/{{ kafka.ssl.keystore.name }}"
+      "CONFIG_whisk_invoker_https_keystorePath": "{{ deploy_dir }}/conf/{{ invoker.ssl.keystore.name }}"
+
+- name: merge native invoker env
+  set_fact:
+    env: "{{ env | combine(native_env) }}"
+
+- name: Write environment.sh
+  template:
+    src: environment.sh.j2
+    dest: "{{ invoker_tmp.path }}/invoker/conf/environment.sh"
+    group: "{{ deploy_group }}"
+    mode: 0770
+
+- name: Install invoker
+  shell: "sg {{ deploy_group }} 'cp -r --preserve=all {{ invoker_tmp.path }}/invoker/* {{ deploy_dir }}'"
+
+- name: Cleanup temp dir
+  file:
+    path: "{{ invoker_tmp.path }}"
+    state: absent
+

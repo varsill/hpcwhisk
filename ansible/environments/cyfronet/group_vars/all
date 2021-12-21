@@ -36,6 +36,8 @@ docker_registry: ""
 runtimes_bypass_pull_for_local_images: true
 invoker_use_runc: "{{ ansible_distribution != 'MacOSX' }}"
 invoker_user_memory: 3072m
+invoker_slurm_modules: ["plgrid/tools/singularity/stable", "plgrid/tools/java8/1.8.0_144"]
+invoker_singularity_image_path: "/net/archive/groups/plggwhisk/images/"
 
 db_prefix: whisk_local_
 
