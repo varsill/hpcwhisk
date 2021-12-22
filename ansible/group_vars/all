@@ -182,13 +182,14 @@ zookeeper_connect_string: "{% set ret = [] %}\
                            {% endfor %}\
                            {{ ret | join(',') }}"
 
-invokerHostnameFromMap: "{{ groups['invokers'] | map('extract', hostvars, 'ansible_host') | list | first }}"
+invokerHostnameFromMap: "{{ (groups['invokers']|length != 0) |ternary(groups['invokers'] | map('extract', hostvars, 'ansible_host') | list | first, omit) }}"
 invokerHostname: "{{ invokerHostnameFromMap | default(inventory_hostname) }}"
 
 # Moved here to avoid recursions. Please do not use outside of invoker-dict.
 __invoker_ssl_keyPrefix: "invoker-"
 
 invoker:
+  archive: "{{ openwhisk_home }}/core/invoker/build/distributions/invoker.tar"
   dir:
     become: "{{ invoker_dir_become | default(false) }}"
   confdir: "{{ config_root_dir }}/invoker"
@@ -224,7 +225,8 @@ invoker:
   reactiveSpi: "{{ invokerReactive_spi | default('') }}"
   serverSpi: "{{ invokerServer_spi | default('') }}"
   singularity:
-    imagePath: "/images/"
+    imagePath: "{{ invoker_singularity_image_path | default('images/') }}"
+  slurmModules: "{{ invoker_slurm_modules | default([]) }}"
 
 userLogs:
   spi: "{{ userLogs_spi | default('org.apache.openwhisk.core.containerpool.logging.DockerToActivationLogStoreProvider') }}"

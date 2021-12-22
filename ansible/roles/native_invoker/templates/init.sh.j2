@@ -1,0 +1,12 @@
+#!/bin/bash
+set -e
+
+{% for module in invoker.slurmModules %}
+module add {{ module }}
+{% endfor %}
+
+cd $(dirname $0)
+source ../conf/environment.sh
+
+export INVOKER_OPTS="$INVOKER_OPTS $(./transformEnvironment.sh)"
+exec ./invoker --id $SLURM_ARRAY_TASK_ID --uniqueName $SLURM_ARRAY_TASK_ID

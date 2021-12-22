@@ -1,0 +1,9 @@
+---
+- hosts: native_invokers
+  vars:
+    host_group: "{{ groups['native_invokers'] }}"
+    name_prefix: "native_invoker"
+    invoker_index_base: 0
+
+  roles:
+    - native_invoker
