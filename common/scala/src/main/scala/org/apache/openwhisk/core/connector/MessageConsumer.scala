@@ -60,6 +60,7 @@ object MessageFeed {
   protected[connector] case object Idle extends FeedState
   protected[connector] case object FillingPipeline extends FeedState
   protected[connector] case object DrainingPipeline extends FeedState
+  protected[connector] case object ShuttingDown extends FeedState
   protected[connector] case object Inactive extends FeedState
 
   protected sealed trait FeedData
@@ -103,7 +104,8 @@ class MessageFeed(description: String,
                   returnMsg: Array[Byte] => Future[Unit] = _ => Future.successful(()),
                   autoStart: Boolean = true,
                   logHandoff: Boolean = true,
-                  fastConsumer: Option[MessageConsumer] = None)
+                  fastConsumer: Option[MessageConsumer] = None,
+                  closeConsumersOnShutdown: Boolean = false)
     extends FSM[MessageFeed.FeedState, MessageFeed.FeedData] {
   import MessageFeed._
 
@@ -131,13 +133,20 @@ class MessageFeed(description: String,
     s"handler capacity = $maximumHandlerCapacity, pipeline fill at = $pipelineFillThreshold, pipeline depth = $maxPipelineDepth")
 
   @tailrec
-  private def switchDisabled(): Unit = {
+  private def returnMessages(): Unit = {
     val occupancy = outstandingMessages.size
     if (occupancy > 0) {
       val (_, _, _, bytes) = outstandingMessages.head
       outstandingMessages = outstandingMessages.tail
       returnMsg(bytes)
-      switchDisabled()
+      returnMessages()
+    }
+  }
+
+  private def closeConsumers(): Unit = {
+    if (closeConsumersOnShutdown) {
+      consumer.close()
+      fastConsumer.map(_.close())
     }
   }
 
@@ -147,7 +156,7 @@ class MessageFeed(description: String,
       goto(FillingPipeline)
 
     case Event(GracefulShutdown, _) =>
-      switchDisabled()
+      closeConsumers()
       goto(Inactive)
 
     case _ => stay
@@ -173,15 +182,9 @@ class MessageFeed(description: String,
       }
 
     case Event(GracefulShutdown, _) =>
-      goto(Inactive)
+      returnMessages()
+      goto(ShuttingDown)
 
-    case _ => stay
-  }
-
-  when(Inactive) {
-    case Event(FillCompleted(messages), _) =>
-      switchDisabled()
-      stay
     case _ => stay
   }
 
@@ -195,9 +198,28 @@ class MessageFeed(description: String,
       } else stay
 
     case Event(GracefulShutdown, _) =>
-      switchDisabled()
+      returnMessages()
       goto(Inactive)
 
+    case _ => stay
+  }
+
+  when (ShuttingDown) {
+    case Event(Processed, _) =>
+      updateHandlerCapacity()
+      stay
+
+    case Event(FillCompleted(messages), _) =>
+      outstandingMessages = outstandingMessages ++ messages
+      returnMessages()
+      closeConsumers()
+      goto(Inactive)
+  }
+
+  when(Inactive) {
+    case Event(Processed, _) =>
+      updateHandlerCapacity()
+      stay
     case _ => stay
   }
 
@@ -226,7 +248,7 @@ class MessageFeed(description: String,
           if (fastRecords.nonEmpty) {
             logging.info(this, s"Received fast ${fastRecords.size}")
             FillCompleted(fastRecords)
-          }else {
+          } else {
             val records = consumer.peek(longPollDuration)
             consumer.commit()
 //            logging.info(this, "Received slow")

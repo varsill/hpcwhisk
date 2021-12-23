@@ -117,26 +117,21 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
       akka.event.Logging.InfoLevel)
   }
 
-  @tailrec
-  private def returnMessages(): Unit = {
-    if (runBuffer.nonEmpty) {
-      val (item, remaining) = runBuffer.dequeue
-      runBuffer = remaining
-      returnMsg.map(i=> i(item.msg))
-    }
-    if (busyPool.nonEmpty) {
-      val (actor, _) = busyPool.head
-      actor ! GracefulShutdown
-      busyPool = busyPool.tail
+  private def gracefulShutdownContainers(): Unit = {
+    busyPool.foreach {
+      _._1 ! GracefulShutdown
     }
 
-    if (runBuffer.nonEmpty || busyPool.nonEmpty) returnMessages()
+    freePool.foreach {
+      _._1 ! GracefulShutdown
+    }
   }
 
   def receive: Receive = {
     case GracefulShutdown =>
       running = false
-      returnMessages()
+      gracefulShutdownContainers()
+      processBufferOrFeed() // all items will be returned
 
     // A job to run on a container
     //
@@ -152,7 +147,12 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
       // It is guaranteed, that only the first message on the buffer is resent.
       if (!running) {
         returnMsg.map(fn => fn(r.msg))
-        returnMessages()
+        if (isResentFromBuffer) {
+          resent = None
+          val (_, newBuffer) = runBuffer.dequeue
+          runBuffer = newBuffer
+          processBufferOrFeed()
+        }
       } else if (runBuffer.isEmpty || isResentFromBuffer) {
         if (isResentFromBuffer) {
           //remove from resent tracking - it may get resent again, or get processed
@@ -344,9 +344,7 @@ class ContainerPool(childFactory: ActorRefFactory => ActorRef,
       case Some((run, _)) => //run the first from buffer
         implicit val tid = run.msg.transid
         //avoid sending dupes
-        if (!running) {
-          returnMessages()
-        } else if (resent.isEmpty) {
+        if (resent.isEmpty) {
           logging.info(this, s"re-processing from buffer (${runBuffer.length} items in buffer)")
           resent = Some(run)
           self ! run

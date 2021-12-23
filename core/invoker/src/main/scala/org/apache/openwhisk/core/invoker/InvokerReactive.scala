@@ -21,6 +21,7 @@ import java.nio.charset.StandardCharsets
 import java.time.Instant
 import akka.Done
 import akka.actor.{ActorRefFactory, ActorSystem, CoordinatedShutdown, Props}
+import scala.concurrent.Promise
 import akka.event.Logging.InfoLevel
 import akka.http.scaladsl.server.Directives.complete
 import akka.http.scaladsl.server.Route
@@ -75,19 +76,6 @@ class InvokerReactive(
   logging.info(this, s"LogStoreProvider: ${logsProvider.getClass}")
 
 
-  Runtime.getRuntime.addShutdownHook(new Thread() {
-    override def run(): Unit = {
-      activationFeed ! MessageFeed.GracefulShutdown
-      pool ! MessageFeed.GracefulShutdown
-      logging.info(this, "Invoker gracefully disabled")
-
-      /* never return */
-      while(true) {
-        Thread.sleep(1000000)
-      }
-    }
-  })
-
   /**
    * Factory used by the ContainerProxy to physically create a new container.
    *
@@ -110,10 +98,23 @@ class InvokerReactive(
   containerFactory.init()
 
   CoordinatedShutdown(actorSystem)
-    .addTask(CoordinatedShutdown.PhaseBeforeActorSystemTerminate, "cleanup runtime containers") { () =>
-//      containerFactory.cleanup()
+    .addTask(CoordinatedShutdown.PhaseServiceUnbind, "Disable processing of activations") { () =>
+      activationFeed ! MessageFeed.GracefulShutdown
+      pool ! MessageFeed.GracefulShutdown
       Future.successful(Done)
     }
+
+  // FIXME: some messages might be already sent from `activationFeed` but not yet decoded (and sent to `pool`)
+  // we give additional delay, but this should be done in more reliable way
+  CoordinatedShutdown(actorSystem)
+    .addTask(CoordinatedShutdown.PhaseServiceRequestsDone, s"Wait up to 60s for completion") { () =>
+      val promise = Promise[Done]()
+      actorSystem.scheduler.scheduleOnce(1.minute) {
+        promise success Done
+      }
+      logging.info(this, "Graceful shutdown: waiting up to 60s for completion")
+      promise.future
+  }
 
   /** Initialize needed databases */
   private val entityStore = WhiskEntityStore.datastore()
@@ -148,7 +149,8 @@ class InvokerReactive(
     msgProvider.getConsumer(config, InvokerReactive.RETURN_TOPIC, InvokerReactive.RETURN_TOPIC, maxPeek, maxPollInterval = TimeLimit.MAX_DURATION + 1.minute)
 
   private val activationFeed = actorSystem.actorOf(Props {
-    new MessageFeed("activation", logging, consumer, maxPeek, 1.second, processActivationMessage, returnRawMessage, fastConsumer=Some(fastConsumer))
+    new MessageFeed("activation", logging, consumer, maxPeek, 1.second, processActivationMessage, returnRawMessage, fastConsumer=Some(fastConsumer),
+      closeConsumersOnShutdown = true)
   })
 
   private val ack = {
