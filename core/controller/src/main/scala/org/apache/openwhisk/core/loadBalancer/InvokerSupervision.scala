@@ -194,12 +194,15 @@ class InvokerPool(childFactory: (ActorRefFactory, InvokerInstanceId) => ActorRef
 
     @tailrec
     def doMigrate(): Future[Unit] = {
-      val received = consumer.peek(30.seconds).toSeq
+      val received = consumer.peek(3.seconds).toSeq
       logging.info(this, s"Got ${received.length} messages")
       consumer.commit() // Best effort
       received.foreach(i => sendActivationToFastlane(i._4))
       if(received.nonEmpty) doMigrate()
-      else Future.successful(consumer.close())
+      else {
+        logging.info(this, s"Migration complete")
+        Future.successful(consumer.close())
+      }
     }
     doMigrate()
   }
