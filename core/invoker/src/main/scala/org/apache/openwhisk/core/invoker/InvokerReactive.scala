@@ -21,6 +21,7 @@ import java.nio.charset.StandardCharsets
 import java.time.Instant
 import akka.Done
 import akka.actor.{ActorRefFactory, ActorSystem, CoordinatedShutdown, Props}
+
 import scala.concurrent.Promise
 import akka.event.Logging.InfoLevel
 import akka.http.scaladsl.server.Directives.complete
@@ -34,7 +35,7 @@ import org.apache.openwhisk.core.containerpool.logging.LogStoreProvider
 import org.apache.openwhisk.core.database.{UserContext, _}
 import org.apache.openwhisk.core.entity._
 import org.apache.openwhisk.core.entity.size._
-import org.apache.openwhisk.core.{ConfigKeys, WhiskConfig}
+import org.apache.openwhisk.core.{ConfigKeys, FeatureFlags, WhiskConfig}
 import org.apache.openwhisk.http.Messages
 import org.apache.openwhisk.spi.SpiLoader
 import pureconfig._
@@ -97,23 +98,33 @@ class InvokerReactive(
           "--pids-limit" -> Set("1024")) ++ logsProvider.containerParameters)
   containerFactory.init()
 
-  CoordinatedShutdown(actorSystem)
-    .addTask(CoordinatedShutdown.PhaseServiceUnbind, "Disable processing of activations") { () =>
-      activationFeed ! MessageFeed.GracefulShutdown
-      pool ! MessageFeed.GracefulShutdown
-      Future.successful(Done)
-    }
-
-  // FIXME: some messages might be already sent from `activationFeed` but not yet decoded (and sent to `pool`)
-  // we give additional delay, but this should be done in more reliable way
-  CoordinatedShutdown(actorSystem)
-    .addTask(CoordinatedShutdown.PhaseServiceRequestsDone, s"Wait up to 60s for completion") { () =>
-      val promise = Promise[Done]()
-      actorSystem.scheduler.scheduleOnce(1.minute) {
-        promise success Done
+  if (FeatureFlags.enableFastlane) {
+    logging.info(this, "Fastlane is enabled")
+    CoordinatedShutdown(actorSystem)
+      .addTask(CoordinatedShutdown.PhaseServiceUnbind, "Disable processing of activations") { () =>
+        activationFeed ! MessageFeed.GracefulShutdown
+        pool ! MessageFeed.GracefulShutdown
+        Future.successful(Done)
       }
-      logging.info(this, "Graceful shutdown: waiting up to 60s for completion")
-      promise.future
+
+    // FIXME: some messages might be already sent from `activationFeed` but not yet decoded (and sent to `pool`)
+    // we give additional delay, but this should be done in more reliable way
+    CoordinatedShutdown(actorSystem)
+      .addTask(CoordinatedShutdown.PhaseServiceRequestsDone, s"Wait up to 60s for completion") { () =>
+        val promise = Promise[Done]()
+        actorSystem.scheduler.scheduleOnce(1.minute) {
+          promise success Done
+        }
+        logging.info(this, "Graceful shutdown: waiting up to 60s for completion")
+        promise.future
+      }
+  } else {
+    logging.info(this, "Fastlane is disabled")
+    CoordinatedShutdown(actorSystem)
+      .addTask(CoordinatedShutdown.PhaseBeforeActorSystemTerminate, "cleanup runtime containers") { () =>
+        containerFactory.cleanup()
+        Future.successful(Done)
+      }
   }
 
   /** Initialize needed databases */
@@ -146,11 +157,12 @@ class InvokerReactive(
     msgProvider.getConsumer(config, topic, topic, maxPeek, maxPollInterval = TimeLimit.MAX_DURATION + 1.minute)
 
   private val fastConsumer =
-    msgProvider.getConsumer(config, InvokerReactive.RETURN_TOPIC, InvokerReactive.RETURN_TOPIC, maxPeek, maxPollInterval = TimeLimit.MAX_DURATION + 1.minute)
+    if (FeatureFlags.enableFastlane) Some(msgProvider.getConsumer(config, InvokerReactive.RETURN_TOPIC, InvokerReactive.RETURN_TOPIC, maxPeek, maxPollInterval = TimeLimit.MAX_DURATION + 1.minute))
+    else None
 
   private val activationFeed = actorSystem.actorOf(Props {
-    new MessageFeed("activation", logging, consumer, maxPeek, 1.second, processActivationMessage, returnRawMessage, fastConsumer=Some(fastConsumer),
-      closeConsumersOnShutdown = true)
+    new MessageFeed("activation", logging, consumer, maxPeek, 1.second, processActivationMessage, returnRawMessage, fastConsumer=fastConsumer,
+      closeConsumersOnShutdown = FeatureFlags.enableFastlane)
   })
 
   private val ack = {
