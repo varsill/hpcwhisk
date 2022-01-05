@@ -183,8 +183,8 @@ object BasicHttpService {
   def addShutdownHook(binding: Future[Http.ServerBinding])(implicit actorSystem: ActorSystem): Unit = {
     implicit val executionContext = actorSystem.dispatcher
     sys.addShutdownHook {
-      Await.result(binding.map(_.unbind()), 30.seconds)
-      Await.result(actorSystem.whenTerminated, 30.seconds)
+      Await.result(binding.map(_.unbind()), 120.seconds)
+      Await.result(actorSystem.whenTerminated, 120.seconds)
     }
   }
 

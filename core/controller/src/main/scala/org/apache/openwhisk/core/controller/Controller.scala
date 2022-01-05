@@ -27,7 +27,7 @@ import akka.http.scaladsl.server.Route
 import kamon.Kamon
 import org.apache.openwhisk.common.Https.HttpsConfig
 import org.apache.openwhisk.common._
-import org.apache.openwhisk.core.{ConfigKeys, WhiskConfig}
+import org.apache.openwhisk.core.{ConfigKeys, FeatureFlags, WhiskConfig}
 import org.apache.openwhisk.core.connector.MessagingProvider
 import org.apache.openwhisk.core.containerpool.logging.LogStoreProvider
 import org.apache.openwhisk.core.database.{ActivationStoreProvider, CacheChangeNotification, RemoteCacheInvalidation}
@@ -261,6 +261,8 @@ object Controller {
     if (!config.isValid) {
       abort("Bad configuration, cannot start.")
     }
+
+    logger.info(this, s"enableFastlane is ${FeatureFlags.enableFastlane}")
 
     val msgProvider = SpiLoader.get[MessagingProvider]
 

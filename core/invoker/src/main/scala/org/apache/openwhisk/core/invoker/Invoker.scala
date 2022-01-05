@@ -29,7 +29,7 @@ import org.apache.openwhisk.core.connector.{MessageProducer, MessagingProvider}
 import org.apache.openwhisk.core.containerpool.{Container, ContainerPoolConfig}
 import org.apache.openwhisk.core.entity._
 import org.apache.openwhisk.core.entity.size._
-import org.apache.openwhisk.core.{ConfigKeys, WhiskConfig}
+import org.apache.openwhisk.core.{ConfigKeys, FeatureFlags, WhiskConfig}
 import org.apache.openwhisk.http.{BasicHttpService, BasicRasService}
 import org.apache.openwhisk.spi.{Spi, SpiLoader}
 import org.apache.openwhisk.utils.ExecutionContextFactory
@@ -189,9 +189,9 @@ object Invoker {
       abort(s"failure during msgProvider.ensureTopic for topic $topicName")
     }
 
-    if (msgProvider
-      .ensureTopic(config, topic = InvokerReactive.RETURN_TOPIC, topicConfig = topicBaseName, maxMessageBytes = maxMessageBytes)
-      .isFailure) {
+    if (FeatureFlags.enableFastlane && msgProvider
+          .ensureTopic(config, topic = InvokerReactive.RETURN_TOPIC, topicConfig = topicBaseName, maxMessageBytes = maxMessageBytes)
+          .isFailure) {
       abort(s"failure during msgProvider.ensureTopic for topic ${InvokerReactive.RETURN_TOPIC}")
     }
 

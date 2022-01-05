@@ -66,6 +66,7 @@ case object Ready extends ContainerState
 case object Pausing extends ContainerState
 case object Paused extends ContainerState
 case object Removing extends ContainerState
+case object WaitingForCompletion extends ContainerState
 
 // Data
 /** Base data type */
@@ -378,9 +379,7 @@ class ContainerProxy(factory: (TransactionId,
 
     case Event(Remove, data: PreWarmedData) => destroyContainer(data, false)
     case Event(GracefulShutdown, data: PreWarmedData) =>
-      logging.info(this, "Graceful shutdown")
-      gracefulShutdown = true
-      destroyContainer(data, false)
+      startGracefulShutdown(data)
 
     // prewarm container failed
     case Event(_: akka.actor.Status.Failure, data: PreWarmedData) =>
@@ -445,9 +444,7 @@ class ContainerProxy(factory: (TransactionId,
       stay() using data
 
     case Event(GracefulShutdown, data: ContainerStarted) =>
-      logging.info(this, "Graceful shutdown")
-      gracefulShutdown = true
-      destroyContainer(data, false)
+      startGracefulShutdown(data)
 
     //ContainerHealthError should cause rescheduling of the job
     case Event(akka.actor.Status.Failure(e: ContainerHealthError), data: WarmedData) =>
@@ -529,9 +526,7 @@ class ContainerProxy(factory: (TransactionId,
 
     case Event(Remove, data: WarmedData) => destroyContainer(data, true)
     case Event(GracefulShutdown, data: ContainerStarted) =>
-      logging.info(this, "Graceful shutdown")
-      gracefulShutdown = true
-      destroyContainer(data, false)
+      startGracefulShutdown(data)
 
     // warm container failed
     case Event(_: akka.actor.Status.Failure, data: WarmedData) =>
@@ -569,9 +564,7 @@ class ContainerProxy(factory: (TransactionId,
       rescheduleJob = true // to suppress sending message to the pool and not double count
       destroyContainer(data, true)
     case Event(GracefulShutdown, data: WarmedData) =>
-      gracefulShutdown = true
-      rescheduleJob = true
-      destroyContainer(data, true)
+      startGracefulShutdown(data)
   }
 
   when(Removing) {
@@ -590,11 +583,7 @@ class ContainerProxy(factory: (TransactionId,
         stay using newData
       }
     case Event(ContainerRemoved(_), _) =>
-      logging.info(this, "Container removed")
-      if (!gracefulShutdown)
-        stop()
-      else
-        stay()
+      stop()
     // Run failed, after another failed concurrent Run
     case Event(_: akka.actor.Status.Failure, data: WarmedData) =>
       activeCount -= 1
@@ -603,6 +592,20 @@ class ContainerProxy(factory: (TransactionId,
         destroyContainer(newData, true)
       } else {
         stay using newData
+      }
+  }
+
+  when(WaitingForCompletion) {
+    case Event(job: Run, _) =>
+      context.parent ! job
+      stay
+    case Event(RunCompleted | akka.actor.Status.Failure, data: WarmedData)  =>
+      activeCount -= 1
+      if (activeCount > 0)
+        stay using data.withoutResumeRun()
+      else {
+        context.parent ! RescheduleJob
+        stop()
       }
   }
 
@@ -692,6 +695,15 @@ class ContainerProxy(factory: (TransactionId,
     } else {
       context.parent ! RescheduleJob
     }
+    doDestroyContainer(container, replacePrewarm, abort, abortResponse)
+    if (stateName != Removing) {
+      goto(Removing) using newData
+    } else {
+      stay using newData
+    }
+  }
+
+  def doDestroyContainer(container: Container, replacePrewarm: Boolean, abort: Boolean = false, abortResponse: Option[ActivationResponse] = None) = {
     val abortProcess = if (abort && runBuffer.nonEmpty) {
       abortBuffered(abortResponse)
     } else {
@@ -709,11 +721,12 @@ class ContainerProxy(factory: (TransactionId,
       .flatMap(_ => abortProcess)
       .map(_ => ContainerRemoved(replacePrewarm))
       .pipeTo(self)
-    if (stateName != Removing) {
-      goto(Removing) using newData
-    } else {
-      stay using newData
-    }
+  }
+
+  def startGracefulShutdown(newData: ContainerStarted) = {
+    gracefulShutdown = true
+    doDestroyContainer(newData.container, false)
+    goto(WaitingForCompletion) using newData
   }
 
   def abortBuffered(abortResponse: Option[ActivationResponse] = None): Future[Any] = {
@@ -975,7 +988,7 @@ class ContainerProxy(factory: (TransactionId,
     }.recoverWith {
       case t =>
         if (gracefulShutdown) {
-          logging.info(this, "Failure during graceful shutdown - resending to parent")
+          logging.info(this, "Failure during graceful shutdown - resending")
           returnMsg.map(f => f(job.msg))
         }
         Future.failed(t)

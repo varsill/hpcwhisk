@@ -17,7 +17,7 @@
 
 package org.apache.openwhisk.connector.kafka
 
-import akka.actor.ActorSystem
+import akka.actor.{ActorRef, ActorSystem}
 import org.apache.kafka.clients.consumer.{ConsumerConfig, KafkaConsumer}
 import org.apache.kafka.common.TopicPartition
 import org.apache.kafka.common.errors.{RetriableException, WakeupException}
@@ -141,6 +141,8 @@ class KafkaConsumerConnector(
   override def close(): Unit = synchronized {
     logging.info(this, s"closing consumer for '$topic'")
     consumer.close()
+    closed = true
+    actorSystem.stop(reporter)
   }
 
   /** Creates a new kafka consumer and subscribes to topic list if given. */
@@ -167,23 +169,26 @@ class KafkaConsumerConnector(
   }
 
   private def recreateConsumer(): Unit = synchronized {
-    logging.info(this, s"recreating consumer for '$topic'")
-    // According to documentation, the consumer is force closed if it cannot be closed gracefully.
-    // See https://kafka.apache.org/11/javadoc/index.html?org/apache/kafka/clients/consumer/KafkaConsumer.html
-    //
-    // For the moment, we have no special handling of 'InterruptException' - it may be possible or even
-    // needed to re-try the 'close()' when being interrupted.
-    tryAndSwallow("closing old consumer")(consumer.close())
-    logging.info(this, s"old consumer closed for '$topic'")
+    if (!closed) {
+      logging.info(this, s"recreating consumer for '$topic'")
+      // According to documentation, the consumer is force closed if it cannot be closed gracefully.
+      // See https://kafka.apache.org/11/javadoc/index.html?org/apache/kafka/clients/consumer/KafkaConsumer.html
+      //
+      // For the moment, we have no special handling of 'InterruptException' - it may be possible or even
+      // needed to re-try the 'close()' when being interrupted.
+      tryAndSwallow("closing old consumer")(consumer.close())
+      logging.info(this, s"old consumer closed for '$topic'")
 
-    consumer = createConsumer(topic)
+      consumer = createConsumer(topic)
+    }
   }
 
   @volatile private var consumer: KafkaConsumer[Array[Byte], Array[Byte]] = createConsumer(topic)
+  @volatile private var closed: Boolean = false
 
   // Read current lag of the consumed topic, e.g. invoker queue
   // Since we use only one partition in kafka, it is defined 0
-  Scheduler.scheduleWaitAtMost(
+  val reporter: ActorRef = Scheduler.scheduleWaitAtMost(
     interval = loadConfigOrThrow[KafkaConfig](ConfigKeys.kafka).consumerLagCheckInterval,
     initialDelay = 10.seconds,
     name = "kafka-lag-monitor") { () =>
@@ -202,6 +207,9 @@ class KafkaConsumerConnector(
     }.andThen {
       case Failure(_: WakeupException) =>
         recreateConsumer()
+      case Failure(e: IllegalStateException) =>
+        if (!closed)
+          logging.info(this, s"lag metric reporting failed for topic '$topic': $e")
       case Failure(e) =>
         // Only log level info because failed metric reporting is not critical
         logging.info(this, s"lag metric reporting failed for topic '$topic': $e")

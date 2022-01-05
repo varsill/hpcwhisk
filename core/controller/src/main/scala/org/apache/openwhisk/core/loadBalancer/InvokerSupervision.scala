@@ -19,7 +19,7 @@ package org.apache.openwhisk.core.loadBalancer
 
 import java.nio.charset.StandardCharsets
 import scala.collection.immutable
-import scala.concurrent.{Await, ExecutionContext, Future}
+import scala.concurrent.{Await, ExecutionContext, Future, blocking}
 import scala.concurrent.duration._
 import scala.util.Failure
 import scala.util.Success
@@ -31,6 +31,7 @@ import akka.actor.FSM.Transition
 import akka.pattern.pipe
 import akka.util.Timeout
 import org.apache.openwhisk.common._
+import org.apache.openwhisk.core.FeatureFlags
 import org.apache.openwhisk.core.connector._
 import org.apache.openwhisk.core.database.NoDocumentException
 import org.apache.openwhisk.core.entity.ActivationId.ActivationIdGenerator
@@ -126,7 +127,8 @@ class InvokerPool(childFactory: (ActorRefFactory, InvokerInstanceId) => ActorRef
     case Transition(invoker, oldState: InvokerState, newState: InvokerState) =>
       refToInstance.get(invoker).foreach { instance =>
         status = status.updated(instance.toInt, new InvokerHealth(instance, newState))
-        if (oldState.isUsable && !newState.isUsable) migrateToFastlane(instance)
+        if (FeatureFlags.enableFastlane && oldState.isUsable && !newState.isUsable)
+          migrateToFastlane(instance)
       }
       logStatus()
 
@@ -194,12 +196,15 @@ class InvokerPool(childFactory: (ActorRefFactory, InvokerInstanceId) => ActorRef
 
     @tailrec
     def doMigrate(): Future[Unit] = {
-      val received = consumer.peek(30.seconds).toSeq
+      val received = consumer.peek(3.seconds).toSeq
       logging.info(this, s"Got ${received.length} messages")
       consumer.commit() // Best effort
       received.foreach(i => sendActivationToFastlane(i._4))
       if(received.nonEmpty) doMigrate()
-      else Future.successful(consumer.close())
+      else {
+        logging.info(this, s"Migration complete")
+        Future.successful(consumer.close())
+      }
     }
     doMigrate()
   }
