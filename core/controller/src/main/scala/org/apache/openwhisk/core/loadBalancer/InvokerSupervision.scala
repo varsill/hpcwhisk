@@ -38,7 +38,6 @@ import org.apache.openwhisk.core.entity.ActivationId.ActivationIdGenerator
 import org.apache.openwhisk.core.entity._
 import org.apache.openwhisk.core.entity.types.EntityStore
 
-import scala.annotation.tailrec
 
 // Received events
 case object GetStatus
@@ -194,16 +193,24 @@ class InvokerPool(childFactory: (ActorRefFactory, InvokerInstanceId) => ActorRef
     val consumer = getInvokerConsumer(instanceId)
     logging.info(this, "Attempt migration")
 
-    @tailrec
     def doMigrate(): Future[Unit] = {
-      val received = consumer.peek(3.seconds).toSeq
-      logging.info(this, s"Got ${received.length} messages")
-      consumer.commit() // Best effort
-      received.foreach(i => sendActivationToFastlane(i._4))
-      if(received.nonEmpty) doMigrate()
-      else {
-        logging.info(this, s"Migration complete")
-        Future.successful(consumer.close())
+      Future {
+        blocking {
+          val received = consumer.peek(3.seconds).toSeq
+          logging.info(this, s"Got ${received.length} messages")
+          consumer.commit() // Best effort
+          received
+        }
+      } transformWith {
+        case Success(items) =>
+          if (items.isEmpty) {
+            logging.info(this, s"Migration complete")
+            Future.successful(consumer.close())
+          } else
+            Future.sequence(items.map(i => sendActivationToFastlane(i._4)))
+              .transformWith(_ => doMigrate())
+        case _ =>
+          Future.successful(consumer.close())
       }
     }
     doMigrate()
