@@ -65,3 +65,9 @@ limit_action_concurrency_max: 500
 limit_action_time_max: 50m
 limit_invocations_per_minute: 12000000
 limit_invocations_concurrent: 500000
+controller_extraEnv:
+  "CONFIG_whisk_controller_activation_maxWaitForBlockingActivation": "40 m"
+  "CONFIG_akka_http_server_requestTimeout": "2420 s"
+  "CONFIG_akka_http_server_lingerTimeout": "2420 s"
+  "CONFIG_akka_http_hostConnectionPool_idleTimeout": "2420 s"
+  "CONFIG_akka_http_server_idleTimeout": "2420 s"
