@@ -72,6 +72,8 @@ class InvokerReactive(
 
   implicit val ec: ExecutionContext = actorSystem.dispatcher
   implicit val cfg: WhiskConfig = config
+  @volatile
+  var inGracefulShutdown: Boolean = false
 
   private val logsProvider = SpiLoader.get[LogStoreProvider].instance(actorSystem)
   logging.info(this, s"LogStoreProvider: ${logsProvider.getClass}")
@@ -102,6 +104,7 @@ class InvokerReactive(
     logging.info(this, "Fastlane is enabled")
     CoordinatedShutdown(actorSystem)
       .addTask(CoordinatedShutdown.PhaseServiceUnbind, "Disable processing of activations") { () =>
+        inGracefulShutdown = true
         activationFeed ! MessageFeed.GracefulShutdown
         pool ! MessageFeed.GracefulShutdown
         Future.successful(Done)
@@ -345,7 +348,7 @@ class InvokerReactive(
 
   private val healthProducer = msgProvider.getProducer(config)
   Scheduler.scheduleWaitAtMost(1.seconds)(() => {
-    healthProducer.send(s"${Invoker.topicPrefix}health", PingMessage(instance)).andThen {
+    healthProducer.send(s"${Invoker.topicPrefix}health", PingMessage(instance, inGracefulShutdown)).andThen {
       case Failure(t) => logging.error(this, s"failed to ping the controller: $t")
     }
   })
