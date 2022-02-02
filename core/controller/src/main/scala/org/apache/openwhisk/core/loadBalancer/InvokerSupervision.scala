@@ -312,9 +312,16 @@ class InvokerActor(invokerInstance: InvokerInstanceId, controllerInstance: Contr
 
   override def receive: Receive = customReceive.orElse(super.receive)
 
+  def processPing(p: PingMessage): State =
+    if (p.gracefulShutdown) {
+    logging.info(this, s"Invoker ${invokerInstance} going offline due to graceful shutdown")
+    goto(Offline)
+  } else
+    stay
+
   // To be used for all states that should send test actions to reverify the invoker
   val healthPingingState: StateFunction = {
-    case Event(_: PingMessage, _) => stay
+    case Event(p: PingMessage, _) => processPing(p)
     case Event(StateTimeout, _)   => goto(Offline)
     case Event(Tick, _) =>
       invokeTestAction()
@@ -334,7 +341,11 @@ class InvokerActor(invokerInstance: InvokerInstanceId, controllerInstance: Contr
 
   /** An Offline invoker represents an existing but broken invoker. This means, that it does not send pings anymore. */
   when(Offline) {
-    case Event(_: PingMessage, _) => goto(Unhealthy)
+    case Event(p: PingMessage, _) =>
+      if (!p.gracefulShutdown)
+        goto(Unhealthy)
+      else
+        stay
   }
 
   /** An Unhealthy invoker represents an invoker that was not able to handle actions successfully. */
@@ -348,7 +359,7 @@ class InvokerActor(invokerInstance: InvokerInstanceId, controllerInstance: Contr
    * It will go offline if that state is not confirmed for 20 seconds.
    */
   when(Healthy, stateTimeout = healthyTimeout) {
-    case Event(_: PingMessage, _) => stay
+    case Event(p: PingMessage, _) => processPing(p)
     case Event(StateTimeout, _)   => goto(Offline)
   }
 
