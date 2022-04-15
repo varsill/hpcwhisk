@@ -18,7 +18,7 @@ db_provider: CouchDB
 db_username: whisk_admin
 db_password: some_passw0rd
 db_protocol: http
-db_host: 149.156.182.156
+db_host: CONTROLLER_HOST_IP
 db_port: 5984
 db_controller_user: whisk_local_controller0
 db_controller_pass: some_controller_passw0rd

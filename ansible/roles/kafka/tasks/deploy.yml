@@ -35,7 +35,7 @@
       "KAFKA_PORT": "19093"
       "KAFKA_ADVERTISED_HOST_NAME": "{{ ansible_host }}"
       "KAFKA_LISTENERS": "INTERNAL://:{{ kafka.advertisedPort + groups['kafkas'].index(inventory_hostname) }},EXTERNAL://0.0.0.0:29093"
-      "KAFKA_ADVERTISED_LISTENERS": "INTERNAL://{{ ansible_host }}:{{ kafka.advertisedPort + groups['kafkas'].index(inventory_hostname) }},EXTERNAL://149.156.182.156:29093"
+      "KAFKA_ADVERTISED_LISTENERS": "INTERNAL://{{ ansible_host }}:{{ kafka.advertisedPort + groups['kafkas'].index(inventory_hostname) }},EXTERNAL://CONTROLLER_HOST_IP:29093" #change controller host ip
       "KAFKA_INTER_BROKER_LISTENER_NAME": "INTERNAL"
       "KAFKA_PROTOCOL_NAME": "INTERNAL"
       "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP": "INSIDE:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT"
@@ -50,7 +50,7 @@
       "KAFKA_PORT": "{{ kafka.port + groups['kafkas'].index(inventory_hostname) }}"
       "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP": "INTERNAL:SSL,EXTERNAL:SSL"
       "KAFKA_LISTENERS": "INTERNAL://:{{ kafka.advertisedPort + groups['kafkas'].index(inventory_hostname) }},EXTERNAL://0.0.0.0:29093"
-      "KAFKA_ADVERTISED_LISTENERS": "INTERNAL://{{ ansible_host }}:{{ kafka.advertisedPort + groups['kafkas'].index(inventory_hostname) }},EXTERNAL://149.156.182.156:29093"
+      "KAFKA_ADVERTISED_LISTENERS": "INTERNAL://{{ ansible_host }}:{{ kafka.advertisedPort + groups['kafkas'].index(inventory_hostname) }},EXTERNAL://CONTROLLER_HOST_IP:29093" #change controller host ip
       "KAFKA_INTER_BROKER_LISTENER_NAME": "INTERNAL"
       "KAFKA_PROTOCOL_NAME": "INTERNAL"
       "KAFKA_SSL_KEYSTORE_LOCATION": "/config/{{ kafka.ssl.keystore.name }}"
