@@ -95,7 +95,7 @@ class InvokerPool(childFactory: (ActorRefFactory, InvokerInstanceId) => ActorRef
   // from leaking the state for external mutation
   var instanceToRef = immutable.Map.empty[Int, ActorRef]
   var refToInstance = immutable.Map.empty[ActorRef, InvokerInstanceId]
-  var status = IndexedSeq[InvokerHealth]()
+  var status = Map[Int, InvokerHealth]()
 
   def receive: Receive = {
     case p: PingMessage =>
@@ -136,8 +136,8 @@ class InvokerPool(childFactory: (ActorRefFactory, InvokerInstanceId) => ActorRef
   }
 
   def logStatus(): Unit = {
-    monitor.foreach(_ ! CurrentInvokerPoolState(status))
-    val pretty = status.map(i => s"${i.id.toInt} -> ${i.status}")
+    monitor.foreach(_ ! CurrentInvokerPoolState(status.values.toIndexedSeq))
+    val pretty = status.values.map(i => s"${i.id.toInt} -> ${i.status}")
     logging.info(this, s"invoker status changed to ${pretty.mkString(", ")}")
   }
 
@@ -167,19 +167,12 @@ class InvokerPool(childFactory: (ActorRefFactory, InvokerInstanceId) => ActorRef
     }
   }
 
-  /** Pads a list to a given length using the given function to compute entries */
-  def padToIndexed[A](list: IndexedSeq[A], n: Int, f: (Int) => A): IndexedSeq[A] = list ++ (list.size until n).map(f)
-
   // Register a new invoker
   def registerInvoker(instanceId: InvokerInstanceId): ActorRef = {
     logging.info(this, s"registered a new invoker: invoker${instanceId.toInt}")(TransactionId.invokerHealth)
 
     // Grow the underlying status sequence to the size needed to contain the incoming ping. Dummy values are created
     // to represent invokers, where ping messages haven't arrived yet
-    status = padToIndexed(
-      status,
-      instanceId.toInt + 1,
-      i => new InvokerHealth(InvokerInstanceId(i, userMemory = instanceId.userMemory), Offline))
     status = status.updated(instanceId.toInt, new InvokerHealth(instanceId, Offline))
 
     val ref = childFactory(context, instanceId)

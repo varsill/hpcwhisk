@@ -4,35 +4,35 @@
 ansible ansible_connection=local
 
 [edge]
-149.156.182.156          ansible_host=149.156.182.156 ansible_user=ubuntu
+CONTROLLER_HOST_IP          ansible_host=CONTROLLER_HOST_IP ansible_user=ubuntu
 
 [controllers]
-controller0         ansible_host=149.156.182.156 ansible_user=ubuntu
+controller0         ansible_host=CONTROLLER_HOST_IP ansible_user=ubuntu
 ;
 [kafkas]
-kafka0              ansible_host=149.156.182.156 ansible_user=ubuntu
+kafka0              ansible_host=CONTROLLER_HOST_IP ansible_user=ubuntu
 
 [zookeepers:children]
 kafkas
 
 [invokers]
-#invoker0            ansible_host=149.156.182.156 ansible_user=ubuntu
+#invoker0            ansible_host=CONTROLLER_HOST_IP ansible_user=ubuntu
 
 [native_invokers]
-prometheus          ansible_host=prometheus.cyfronet.pl deploy_dir=/net/archive/groups/plggwhisk/native_invoker deploy_group=plggwhisk ansible_remote_tmp=/tmp
+prometheus          ansible_host=INVOKER_HOST_IP deploy_dir=/net/archive/groups/plggwhisk/native_invoker deploy_group=plggwhisk ansible_remote_tmp=/tmp
 
 ; db group is only used if db.provider is CouchDB
 [db]
-149.156.182.156          ansible_host=149.156.182.156 ansible_user=ubuntu
+CONTROLLER_HOST_IP          ansible_host=CONTROLLER_HOST_IP ansible_user=ubuntu
 
 [elasticsearch:children]
 db
 
 [redis]
-149.156.182.156          ansible_host=149.156.182.156 ansible_user=ubuntu
+CONTROLLER_HOST_IP          ansible_host=CONTROLLER_HOST_IP ansible_user=ubuntu
 
 [apigateway]
-149.156.182.156          ansible_host=149.156.182.156 ansible_user=ubuntu
+CONTROLLER_HOST_IP          ansible_host=CONTROLLER_HOST_IP ansible_user=ubuntu
 
 [etcd]
-etcd0            ansible_host=149.156.182.156 ansible_user=ubuntu
+etcd0            ansible_host=CONTROLLER_HOST_IP ansible_user=ubuntu
