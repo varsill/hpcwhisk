@@ -174,17 +174,22 @@ class SingularityClient(singularityHost: Option[String] = None,
       writer.close()
 
       val bindString = portConfigFilePath.toString + s":/port.conf"
+      
+      val directory = runCmdWithoutSingularity("mktemp", "-d").andThen {
+        case directory => directory
+      }
+      val bindString2 = directory.concat(":/action")
 
       var imagePath = (imagePathConfig.imagePath ++ image ++ ".simg")
       if (image == "python3aiaction") {
-        runCmd(Seq("instance", "start", "--nv", "--bind", bindString, imagePath, id.toString), config.timeouts.run)
+        runCmd(Seq("instance", "start", "--nv", "--bind", bindString, "--bind", bindString2, imagePath, id.toString), config.timeouts.run)
         .andThen {
           case _ =>
             runSemaphore.release()
         }
       }
       else {
-        runCmd(Seq("instance", "start", "-c", "--bind", bindString, imagePath, id.toString), config.timeouts.run)
+        runCmd(Seq("instance", "start", "-c", "--bind", bindString, "--bind", bindString2, imagePath, id.toString), config.timeouts.run)
         .andThen {
           case _ => 
             runSemaphore.release()
@@ -251,6 +256,24 @@ class SingularityClient(singularityHost: Option[String] = None,
         transid.failed(this, start, t.getMessage, ErrorLevel)
     }
   }
+
+  protected def runCmdWithoutSingularity(cmd: Seq[String], timeout: Duration)(implicit transid: TransactionId): Future[String] = {
+    val start = transid.started(
+      this,
+      LoggingMarkers.INVOKER_SINGULARITY_CMD(args.head),
+      s"running ${cmd.mkString(" ")} (timeout: $timeout)",
+      logLevel = InfoLevel)
+    executeProcess(cmd, timeout).andThen {
+      case Success(_) =>
+        transid.finished(this, start)
+      case Failure(pte: ProcessTimeoutException) =>
+        transid.failed(this, start, pte.getMessage, ErrorLevel)
+        MetricEmitter.emitCounterMetric(LoggingMarkers.INVOKER_SINGULARITY_CMD_TIMEOUT(args.head))
+      case Failure(t) =>
+        transid.failed(this, start, t.getMessage, ErrorLevel)
+    }
+  }
+
 }
 
 trait SingularityApi {
