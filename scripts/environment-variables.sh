@@ -77,8 +77,6 @@ export CONFIG_whisk_singularity_client_imagePath=$(pwd)/images/
 
 
 export CONFIG_whisk_runtimes_bypassPullForLocalImages=true
-#export SINGULARITY_TMPDIR=/net/archive/groups/plggwhisk/sing_tmp
 export SINGULARITY_TMPDIR=/tmp
 export TMPDIR=/tmp
-#export CONFIG_whisk_spi_logStoreProvider="org.apache.openwhisk.core.containerpool.logging.LogDriverLogStoreProvider"
 export SINGULARITY_BIND=/net/people/plgrid/plgvarsill/persistent_volume
